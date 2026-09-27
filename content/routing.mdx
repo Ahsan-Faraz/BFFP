@@ -1,0 +1,267 @@
+## How Express reads a URL
+
+<Summary>
+**URL** = which resource? **Method** = what to do with it? **Path parameter** = which specific one? **Query parameter** = how do I want the result?
+</Summary>
+
+export const readUrlSteps = [
+  { from: "client", to: "express", label: "GET …/123/orders?page=2", caption: "A request arrives: GET /api/v1/users/123/orders?page=2&limit=20." },
+  { from: "express", to: "express", label: "split path | query", caption: "Express separates the path from the query string. The query is not used for route matching." },
+  { from: "express", to: "express", label: "match route", caption: "It walks the routes top to bottom and finds /api/v1/users/:userId/orders." },
+  { from: "express", to: "express", label: "fill params + query", caption: "The :userId segment becomes req.params.userId, and the query string becomes req.query. All values are strings." },
+  { from: "express", to: "handler", label: "handler(req, res)", caption: "The matching handler runs with req.params and req.query ready." },
+  { from: "handler", to: "client", label: "200 JSON", dashed: true, caption: "The handler responds." },
+]
+
+export const readUrlDebug = [
+  `GET /api/v1/users/123/orders?page=2&limit=20 HTTP/1.1\nHost: api.shop.com`,
+  `path  = "/api/v1/users/123/orders"\nquery = "page=2&limit=20"`,
+  `✗ /api/v1/products\n✗ /api/v1/products/:productId\n✓ /api/v1/users/:userId/orders`,
+  `req.params = { userId: "123" }\nreq.query  = { page: "2", limit: "20" }`,
+  `app.get('/api/v1/users/:userId/orders', (req, res) => { … })`,
+  `HTTP/1.1 200 OK\nContent-Type: application/json\n\n{ "userId": "123", "page": "2", "orders": [ … ] }`,
+]
+
+<StepDiagram
+  title="One request through the router"
+  debug={readUrlDebug}
+  actors={[
+    { id: "client", label: "Client" },
+    { id: "express", label: "Express router" },
+    { id: "handler", label: "Handler" },
+  ]}
+  steps={readUrlSteps}
+/>
+
+## Static routes
+
+<Summary>
+A fixed URL. The path itself never changes.
+</Summary>
+
+```js
+app.get('/api/products', (req, res) => {
+  res.json(products) // GET /api/products → "give me all products"
+})
+```
+
+Other examples: `/api/users`, `/api/orders`, `/api/categories`.
+
+## Dynamic routes (path parameters)
+
+<Summary>
+`:productId` matches one segment and identifies **one specific** resource. Express puts it in `req.params`.
+</Summary>
+
+```js
+app.get('/api/products/:productId', (req, res) => {
+  const productId = req.params.productId // GET /api/products/123 → "123" (a string)
+  res.json({ productId })
+})
+```
+
+## Query parameters
+
+<Summary>
+For filtering, searching, sorting and pagination. Express puts them in `req.query`, and they are not part of route matching.
+</Summary>
+
+```js
+// GET /api/products?category=shoes&page=2&limit=20&sort=price
+app.get('/api/products', (req, res) => {
+  const { category, page, limit, sort } = req.query // all strings: page === "2"
+})
+```
+
+| | Path parameter | Query parameter |
+| --- | --- | --- |
+| Example | `/products/123` | `/products?page=2&sort=price` |
+| Answers | **Which** product? | **How** do I want them? |
+| Express | `req.params` | `req.query` |
+| Used for matching? | Yes | No |
+
+<Callout type="trap">
+`req.params` and `req.query` values are always **strings**. `req.query.page` is `"2"`, not `2`, so convert it with `Number()` before doing math.
+</Callout>
+
+## Nested routes
+
+<Summary>
+Parent → child relationship: the orders **of** a user. Keep nesting shallow.
+</Summary>
+
+```js
+app.get('/api/users/:userId/orders', (req, res) => {
+  const { userId } = req.params // orders belonging to user 123
+})
+
+app.get('/api/users/:userId/orders/:orderId', (req, res) => {
+  const { userId, orderId } = req.params // order 456 of user 123
+})
+```
+
+If URLs start looking like `/users/123/orders/456/items/789/reviews/999`, rethink the resource design. `/orders/456` or `/reviews/999` usually works on its own.
+
+## API versioning
+
+<Summary>
+Put breaking changes in a new version (`/v2`), so old clients keep working on `/v1` until they migrate.
+</Summary>
+
+export const verClient = [
+  { id: "client", label: "Client" },
+  { id: "server", label: "Server" },
+]
+
+<StepDiagram
+  title="Old and new clients side by side"
+  panels={[
+    {
+      title: "Old frontend",
+      actors: verClient,
+      steps: [
+        { from: "client", to: "server", label: "GET /api/v1/products" },
+        { from: "server", to: "server", label: "getProductsV1" },
+        { from: "server", to: "client", label: "{ name, price }", dashed: true },
+      ],
+    },
+    {
+      title: "New frontend",
+      actors: verClient,
+      steps: [
+        { from: "client", to: "server", label: "GET /api/v2/products" },
+        { from: "server", to: "server", label: "getProductsV2" },
+        { from: "server", to: "client", label: "{ title, amount }", dashed: true },
+      ],
+    },
+  ]}
+  captions={[
+    "The old frontend still calls /v1; the new one calls /v2.",
+    "Each version has its own handler.",
+    "v2 renamed the fields, which is a breaking change, but v1 clients still get the shape they expect. Later, v1 is deprecated and removed.",
+  ]}
+  debug={[
+    [
+      `GET /api/v1/products HTTP/1.1`,
+      `app.get('/api/v1/products', getProductsV1)`,
+      `HTTP/1.1 200 OK\n\n[{ "name": "Laptop", "price": 1000 }]`,
+    ],
+    [
+      `GET /api/v2/products HTTP/1.1`,
+      `app.get('/api/v2/products', getProductsV2)`,
+      `HTTP/1.1 200 OK\n\n[{ "title": "Laptop", "amount": 1000 }]`,
+    ],
+  ]}
+/>
+
+```js
+app.get('/api/v1/products', getProductsV1)
+app.get('/api/v2/products', getProductsV2)
+```
+
+## Catch-all 404 and route order
+
+<Summary>
+Express matches routes **top to bottom** and stops at the first match. The 404 handler goes **last**.
+</Summary>
+
+Try the e-commerce routes below. Tick the "mistake" box to see what happens when the catch-all is at the top.
+
+<RouteMatcher />
+
+```js
+app.get('/api/products', getProducts)
+app.get('/api/users', getUsers)
+app.get('/api/orders', getOrders)
+
+// keep this at the bottom: "if nothing above handled it, handle it here"
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' })
+})
+```
+
+<Callout type="trap">
+A request with a wrong method (e.g. `DELETE /api/v1/products` when only GET/POST exist) doesn't get 405 automatically in Express. No route matches, so it falls through to your 404 handler.
+</Callout>
+
+## Real-world example: e-commerce
+
+<Summary>
+Static + query, dynamic, nested, create, update, delete, and catch-all, all in one small app.
+</Summary>
+
+```js
+const express = require('express')
+const app = express()
+app.use(express.json())
+
+app.get('/api/v1/products', (req, res) => { // static + query
+  const { category, page, limit } = req.query
+  res.json({ category, page, limit })
+})
+
+app.get('/api/v1/products/:productId', (req, res) => { // dynamic
+  res.json({ message: `Product ${req.params.productId}` })
+})
+
+app.get('/api/v1/products/:productId/reviews', (req, res) => { // nested
+  res.json({ message: `Reviews for ${req.params.productId}` })
+})
+
+app.post('/api/v1/products', (req, res) => { // create
+  res.status(201).json({ message: 'Product created' })
+})
+
+app.patch('/api/v1/products/:productId', (req, res) => { // partial update
+  res.json({ message: `Product ${req.params.productId} updated` })
+})
+
+app.delete('/api/v1/products/:productId', (req, res) => { // delete
+  res.status(204).send()
+})
+
+app.use((req, res) => { // catch-all, last
+  res.status(404).json({ error: 'Route not found' })
+})
+
+app.listen(3000)
+```
+
+Define each route once. Don't register `GET /api/v1/products` twice; combine the logic in one handler.
+
+## Best practices
+
+<Summary>
+Nouns not verbs, plural names, meaningful parameter names, query params for filters, PATCH vs PUT, shallow nesting, 404 last.
+</Summary>
+
+| Rule | Good | Bad |
+| --- | --- | --- |
+| Nouns, not verbs | `GET /users`, `DELETE /users/123` | `/getUsers`, `POST /deleteUser/123` |
+| Plural names | `/users`, `/products` | `/user/123` and `/products/456` mixed |
+| Meaningful params | `/products/:productId` | `/products/:id` |
+| Filters in the query | `/products?category=shoes` | `/products/shoes` |
+| PATCH vs PUT | `PATCH /products/123 { "price": 900 }` | PUT with one field |
+| Shallow nesting | `/users/123/orders` | `/users/123/orders/456/items/789/reviews` |
+| Consistent casing | `/users/123` | `/Users/123` |
+| Don't hide operations | `DELETE /products/123` | `/products/123?delete=true` |
+| 404 last | catch-all at the bottom | catch-all before real routes |
+
+## Quiz
+
+Think of the answer first, then reveal it.
+
+export const quiz = [
+  { kind: "concept", q: "What's the difference between a path parameter and a query parameter? Where does Express put each?", a: "A path parameter identifies **which** resource (`/products/123` → `req.params.productId`). A query parameter says **how** you want the result: filter, sort, paginate (`?page=2&sort=price` → `req.query`)." },
+  { kind: "concept", q: "Is the query string used when Express matches a route?", a: "No. `/api/products?category=shoes` matches the route `/api/products`; the query just fills `req.query`." },
+  { kind: "concept", q: "What type is `req.query.page` for `?page=2`?", a: "A string, `\"2\"`. Route and query values are always strings, so convert with `Number()`." },
+  { kind: "scenario", q: "Every request to your API returns 404, even valid ones. You just added a catch-all. What's wrong?", a: "The catch-all `app.use(...)` was registered **before** the real routes. Express matches top to bottom and stops at the first match, so the catch-all swallows everything. Move it to the bottom." },
+  { kind: "concept", q: "Why use API versioning like /v1 and /v2?", a: "To ship breaking changes (e.g. renaming `name` → `title`) without breaking old clients. Old frontends keep calling `/v1` while new ones use `/v2`; v1 is deprecated and removed once everyone migrates." },
+  { kind: "scenario", q: "Review this API: `GET /getUsers`, `POST /createUser`, `POST /deleteUser/123`. How would you fix it?", a: "Use nouns and let the method express the action: `GET /users`, `POST /users`, `DELETE /users/123`." },
+  { kind: "concept", q: "When do you use PATCH vs PUT?", a: "PATCH for a partial update (`PATCH /products/123 { \"price\": 900 }` changes one field). PUT to replace the whole resource with the body you send." },
+  { kind: "scenario", q: "A teammate designs `/users/123/orders/456/items/789/reviews/999`. What do you suggest?", a: "The nesting is too deep. Keep it shallow: `/users/123/orders` for the relationship, then address children directly, e.g. `/orders/456` or `/reviews/999`." },
+  { kind: "scenario", q: "Should filtering be `/products/shoes` or `/products?category=shoes`? Why?", a: "`/products?category=shoes`. “shoes” is a filter on the product list, not a resource of its own. Path segments are for identifying resources; filters, sorting and pagination go in the query string." },
+  { kind: "concept", q: "A client sends `DELETE /api/v1/products` (no ID) and you only defined GET and POST on that path. What does Express return?", a: "No route matches that method + path, so it falls through to the catch-all and returns your **404**. Express doesn't send 405 automatically." },
+]
+
+<Quiz id="routing" questions={quiz} />

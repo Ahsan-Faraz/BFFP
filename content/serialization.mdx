@@ -1,0 +1,285 @@
+## The core problem
+
+<Summary>
+Client and server are written in different languages and can't understand each other's in-memory data. They need a common format both agree on.
+</Summary>
+
+export const rawActors = [
+  { id: "client", label: "JS client" },
+  { id: "server", label: "Rust server" },
+]
+
+<StepDiagram
+  title="Sending a JavaScript object to a Rust server"
+  panels={[
+    {
+      title: "No common format",
+      actors: rawActors,
+      steps: [
+        { from: "client", to: "client", label: "{ name, age } object", state: { client: "JS object\n(in JS memory)" } },
+        { from: "client", to: "server", label: "send the object?", tone: "bad" },
+        { from: "server", to: "server", label: "unknown bytes ✗", tone: "bad" },
+      ],
+    },
+    {
+      title: "Agreed format: JSON",
+      actors: rawActors,
+      steps: [
+        { from: "client", to: "client", label: "JSON.stringify", state: { client: "JSON text" } },
+        { from: "client", to: "server", label: "JSON string" },
+        { from: "server", to: "server", label: "parse → struct", state: { server: "Rust struct\nUser" } },
+      ],
+    },
+  ]}
+  captions={[
+    "The client has a JavaScript object in memory. Left: it tries to use it as-is. Right: it first converts it to JSON text.",
+    "Left: a JS object is a structure in the JS engine's memory, with nothing meaningful to put on the wire. Right: plain text travels fine.",
+    "Left: the Rust server (strict, compiled types) has no idea what it received. Right: Rust parses the JSON into its own strict User struct.",
+  ]}
+  debug={[
+    [
+      `const user = { name: "Ali", age: 25 }   // lives in V8's heap`,
+      `socket.write(user)\n// TypeError: The "chunk" argument must be of type string or Buffer`,
+      `Rust: expected a known format, got nothing it understands`,
+    ],
+    [
+      `JSON.stringify({ name: "Ali", age: 25 })\n→ '{"name":"Ali","age":25}'   (typeof "string")`,
+      `POST /users HTTP/1.1\nContent-Type: application/json\n\n{"name":"Ali","age":25}`,
+      `let user: User = serde_json::from_str(body)?;\n// User { name: "Ali", age: 25 }`,
+    ],
+  ]}
+/>
+
+JavaScript is dynamic and loosely typed. Rust is compiled with strict types. Neither can read the other's memory, so both write and read a shared text format instead.
+
+## What is serialization?
+
+<Summary>
+**Serialization:** native data → common format (JSON) before sending. **Deserialization:** common format → native data after receiving.
+</Summary>
+
+export const journeyActors = [
+  { id: "client", label: "Client", sub: "JavaScript" },
+  { id: "net", label: "Network" },
+  { id: "server", label: "Server" },
+]
+
+<StepDiagram
+  title="The complete journey"
+  scenarios={[
+    {
+      label: "JS client ↔ Python server",
+      actors: journeyActors,
+      steps: [
+        { from: "client", to: "client", label: "JSON.stringify", state: { client: "JS object" }, caption: "The client serializes its JS object into a JSON string." },
+        { from: "client", to: "net", label: "JSON string", caption: "The string travels over the network." },
+        { from: "net", to: "server", label: "JSON string", caption: "The exact same string arrives at the Python server." },
+        { from: "server", to: "server", label: "json.loads", state: { server: "Python dict" }, caption: "Python deserializes it into its own native type, a dict." },
+        { from: "server", to: "server", label: "json.dumps", caption: "To reply, the server serializes a dict into JSON." },
+        { from: "server", to: "net", label: "JSON string", dashed: true, caption: "The JSON travels back." },
+        { from: "net", to: "client", label: "JSON string", dashed: true, caption: "It arrives at the browser." },
+        { from: "client", to: "client", label: "JSON.parse → UI", state: { client: "JS object → UI" }, caption: "The client deserializes it into a JS object and updates the UI. Neither side ever needed the other's language." },
+      ],
+      debug: [
+        `const user = { name: "Ali", age: 25 }\nconst body = JSON.stringify(user)\n// '{"name":"Ali","age":25}'   typeof → "string"`,
+        `POST /users HTTP/1.1\nContent-Type: application/json\nContent-Length: 23\n\n{"name":"Ali","age":25}`,
+        `request body (bytes → text): {"name":"Ali","age":25}`,
+        `user = json.loads(body)\n# {'name': 'Ali', 'age': 25}   type → <class 'dict'>`,
+        `json.dumps({"created": True, "id": 7})\n# '{"created": true, "id": 7}'`,
+        `HTTP/1.1 201 Created\nContent-Type: application/json\n\n{"created": true, "id": 7}`,
+        `response body: {"created": true, "id": 7}`,
+        `const data = await res.json()   // JSON.parse under the hood\n// { created: true, id: 7 }   typeof → "object"`,
+      ],
+    },
+    {
+      label: "Form → Express (full workflow)",
+      actors: [
+        { id: "client", label: "Browser", sub: "JavaScript" },
+        { id: "net", label: "Network" },
+        { id: "server", label: "Node / Express" },
+      ],
+      steps: [
+        { from: "client", to: "client", label: "1. gather input", state: { client: "{ name, age }" }, caption: "1. Client prepares data: the form input becomes a JS object." },
+        { from: "client", to: "client", label: "2. JSON.stringify", caption: "2. Serialize (client): the object becomes a JSON string in the request body." },
+        { from: "client", to: "server", label: "3. packets travel", caption: "3. Travel: the string is split into packets, crosses the internet and is reassembled at the server." },
+        { from: "server", to: "server", label: "4. express.json()", state: { server: "req.body\n(JS object)" }, caption: "4. Deserialize (server): express.json() runs JSON.parse, so req.body is an object." },
+        { from: "server", to: "server", label: "5. business logic", caption: "5. Business logic: validate, query the database, build the response object." },
+        { from: "server", to: "client", label: "6. res.json()", dashed: true, caption: "6. Serialize (server): res.json() calls JSON.stringify and sets Content-Type: application/json." },
+        { from: "client", to: "client", label: "7. parse → UI", caption: "7. Deserialize (client): the frontend parses the JSON and updates the UI." },
+      ],
+      debug: [
+        `const user = { name: form.name.value, age: Number(form.age.value) }\n// { name: "Ali", age: 25 }`,
+        `fetch("/users", {\n  method: "POST",\n  headers: { "Content-Type": "application/json" },\n  body: JSON.stringify(user),   // '{"name":"Ali","age":25}'\n})`,
+        `POST /users HTTP/1.1\nContent-Type: application/json\n\n{"name":"Ali","age":25}`,
+        `app.use(express.json())\nreq.body → { name: 'Ali', age: 25 }   typeof → "object"`,
+        `INSERT INTO users (name, age) VALUES ('Ali', 25) RETURNING id;   → 7`,
+        `res.status(201).json({ created: { id: 7, name: "Ali", age: 25 } })\n\nHTTP/1.1 201 Created\nContent-Type: application/json; charset=utf-8\n\n{"created":{"id":7,"name":"Ali","age":25}}`,
+        `const data = await res.json()\n// { created: { id: 7, name: "Ali", age: 25 } }`,
+      ],
+    },
+  ]}
+/>
+
+Serialization makes communication **language-agnostic**: any machine can talk to any other, as long as both agree on the format.
+
+## Text vs binary formats
+
+<Summary>
+Text formats (JSON, XML, YAML) are human-readable and a bit bigger. Binary formats (Protobuf, Avro) are raw bytes: smaller and faster, but you need a tool to read them.
+</Summary>
+
+| Category | Examples | When used |
+| --- | --- | --- |
+| Text | JSON, XML, YAML | REST APIs, config files, logs |
+| Binary | Protobuf, Avro | High-performance service-to-service |
+
+The same user, `{ name: "Ali", age: 25 }`, in both:
+
+```json
+{"name":"Ali","age":25}
+```
+
+```bash
+# Protobuf (schema: name = field 1, age = field 2): 7 bytes instead of 23
+0a 03 41 6c 69 10 19
+```
+
+JSON is the default for REST APIs. You'll rarely use XML or binary formats unless a system requires it.
+
+## JSON rules
+
+<Summary>
+Keys in double quotes. Values: string, number, boolean, null, array or object. No comments, no trailing commas.
+</Summary>
+
+JSON (JavaScript Object Notation) isn't limited to JavaScript; every language reads and writes it. It's used in REST requests and responses, log files, and config files like `package.json` and `tsconfig.json`.
+
+- A JSON document can be **any** JSON value: an object `{…}`, an array `[…]`, a string, a number, `true`/`false`, or `null`. It doesn't have to start with `{`.
+- All keys must be strings in **double quotes**: `"name"`, not `name` or `'name'`.
+- Values can only be: string, number, boolean, `null`, array, or another object.
+- No comments.
+- No trailing commas.
+
+<JsonPlayground />
+
+## The backend engineer's mental model
+
+<Summary>
+Data crosses many network layers, but by the time it reaches your server the network has reassembled exactly the JSON string the client sent. You work at the **application layer**.
+</Summary>
+
+export const layerSteps = [
+  { from: "app", to: "stack", label: "JSON string", caption: "Your app hands its JSON string to the network stack." },
+  { from: "stack", to: "stack", label: "HTTP wraps it", caption: "HTTP: adds the request line and headers around the JSON." },
+  { from: "stack", to: "stack", label: "TCP: packets", caption: "TCP: splits it into numbered segments so they can be reordered and resent if lost." },
+  { from: "stack", to: "stack", label: "IP: route", caption: "IP: addresses each packet and routes it across the internet." },
+  { from: "stack", to: "sstack", label: "0s and 1s", caption: "Physical: bits on the wire, radio or fibre." },
+  { from: "sstack", to: "sstack", label: "reassemble", caption: "On the server, TCP puts the segments back in order and fills any gaps." },
+  { from: "sstack", to: "server", label: "same JSON string", caption: "HTTP is unwrapped, and your server receives exactly the JSON the client sent. That's the only layer you deal with." },
+]
+
+export const layerDebug = [
+  `{"name":"Ali","age":25}`,
+  `POST /users HTTP/1.1\nHost: api.shop.com\nContent-Type: application/json\nContent-Length: 23\n\n{"name":"Ali","age":25}`,
+  `TCP segment seq=1   [POST /users HTTP/1.1 …]\nTCP segment seq=97  [{"name":"Ali","age":25}]`,
+  `IP packet  src 203.0.113.7  →  dst 65.21.100.200`,
+  `01010000 01001111 01010011 01010100 …`,
+  `segments 1, 97 received → in order ✓ → byte stream rebuilt`,
+  `req.body → { name: 'Ali', age: 25 }`,
+]
+
+<StepDiagram
+  title="What happens underneath (and why you can ignore it)"
+  debug={layerDebug}
+  actors={[
+    { id: "app", label: "Client app", sub: "application" },
+    { id: "stack", label: "Client network", sub: "HTTP · TCP · IP" },
+    { id: "sstack", label: "Server network", sub: "IP · TCP · HTTP" },
+    { id: "server", label: "Your server", sub: "application" },
+  ]}
+  steps={layerSteps}
+/>
+
+## Code: serialize and deserialize in Node
+
+<Summary>
+`JSON.stringify()` serializes and `JSON.parse()` deserializes. In Express, `express.json()` and `res.json()` do both for you.
+</Summary>
+
+```js
+const user = { name: 'Ali', age: 25 }
+
+const jsonString = JSON.stringify(user) // SERIALIZE → '{"name":"Ali","age":25}'  (string)
+const jsObject = JSON.parse(jsonString) // DESERIALIZE → { name: 'Ali', age: 25 }  (object)
+```
+
+**What Express does automatically:**
+
+```js
+app.use(express.json()) // deserializes every JSON request body (without it, req.body is undefined)
+
+app.post('/users', (req, res) => {
+  const user = req.body // already a JS object
+  res.status(201).json({ created: user }) // serializes + sets Content-Type: application/json
+})
+```
+
+**Without Express**, this is the work `express.json()` and `res.json()` hide:
+
+```js
+const http = require('http')
+
+http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/users') {
+    let body = ''
+    req.on('data', (chunk) => (body += chunk)) // collect raw chunks from the stream
+    req.on('end', () => {
+      let user
+      try {
+        user = JSON.parse(body) // manually deserialize
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ error: 'invalid JSON' })) // bad JSON must not crash the server
+      }
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ created: user })) // manually serialize
+    })
+  }
+}).listen(3000)
+```
+
+<Callout type="trap">
+`JSON.parse` **throws** on invalid input. `express.json()` catches that and replies `400 Bad Request`, but when you parse by hand, wrap it in try/catch, or one bad request body crashes the process.
+</Callout>
+
+## Quick revision
+
+| Term | One line |
+| --- | --- |
+| Serialization | Your data **into** JSON before sending |
+| Deserialization | JSON back **into** your data after receiving |
+| JSON | Text-based, human-readable, the standard for REST APIs |
+| Binary formats | Protobuf, Avro: smaller and faster, not human-readable |
+| `JSON.stringify()` | JS value → JSON string |
+| `JSON.parse()` | JSON string → JS value (throws on invalid input) |
+| `express.json()` | Auto-deserializes every JSON request body |
+| `res.json()` | Auto-serializes the response and sets Content-Type |
+
+## Quiz
+
+Think of the answer first, then reveal it.
+
+export const quiz = [
+  { kind: "concept", q: "What are serialization and deserialization?", a: "Serialization converts your language's native data into a common transferable format (like JSON) before sending. Deserialization converts that format back into native data after receiving." },
+  { kind: "concept", q: "Why can't a JavaScript client just send its object to a Rust or Python server?", a: "An object is a structure in the JS engine's memory. The other language can't read it, and there's nothing meaningful to put on the wire. Both sides need a shared format, like JSON, to write and read." },
+  { kind: "concept", q: "Text vs binary formats: examples and trade-offs?", a: "Text (JSON, XML, YAML): human-readable, slightly larger, used for REST, configs, logs. Binary (Protobuf, Avro): compact and fast, not human-readable, used for high-performance service-to-service calls." },
+  { kind: "concept", q: "Is `[1, 2, 3]` valid JSON? What about `\"hello\"` or `null`?", a: "Yes, all three. A JSON document can be any JSON value: object, array, string, number, boolean, or null. It doesn't have to start with `{`." },
+  { kind: "scenario", q: "What's wrong with `{ name: 'Ali', age: 25, }` as JSON?", a: "Three errors: the key `name` isn't in double quotes, `'Ali'` uses single quotes (strings need double quotes), and there's a trailing comma. `JSON.parse` would throw." },
+  { kind: "concept", q: "What do `express.json()` and `res.json()` do under the hood?", a: "`express.json()` reads the request body stream and runs `JSON.parse`, putting the result in `req.body` (and replying 400 on invalid JSON). `res.json()` runs `JSON.stringify`, sets `Content-Type: application/json`, and sends it." },
+  { kind: "scenario", q: "`req.body` is `undefined` in your POST handler. Why?", a: "The `express.json()` middleware isn't registered (or is registered after the route), so the body is never deserialized. Add `app.use(express.json())` before your routes, and make sure the client sends `Content-Type: application/json`." },
+  { kind: "scenario", q: "Your plain Node server crashes when a client sends malformed JSON. Why, and how do you fix it?", a: "`JSON.parse` throws on invalid input, and nothing catches it inside the request's `end` callback, so the process crashes. Wrap it in try/catch and respond `400 Bad Request`." },
+  { kind: "concept", q: "As a backend engineer, which network layer do you work with, and why can you ignore the rest?", a: "The application layer, which is the JSON itself. HTTP wraps it, TCP splits and reassembles packets, IP routes them, and the physical layer moves bits, but by the time data reaches your server it's exactly the JSON string the client sent." },
+  { kind: "concept", q: "Walk through the full request/response serialization flow for a form submit to Express.", a: "Gather the input into a JS object → `JSON.stringify` into the body → packets travel → `express.json()` parses it into `req.body` → business logic → `res.json()` serializes the response → the client parses the JSON and updates the UI." },
+]
+
+<Quiz id="serialization" questions={quiz} />

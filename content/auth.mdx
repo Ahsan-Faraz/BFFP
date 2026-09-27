@@ -1,0 +1,1795 @@
+## Authentication vs Authorization
+
+<Summary>
+Authentication = **who** are you? Authorization = **what** are you allowed to do?
+</Summary>
+
+export const authzUser = {
+  title: "Ali is a user",
+  actors: [
+    { id: "ali", label: "Ali" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Database" },
+  ],
+  steps: [
+    { from: "ali", to: "server", label: "email + password" },
+    { from: "server", to: "server", label: "authN: Ali ✓" },
+    { from: "ali", to: "server", label: "DELETE /users/7" },
+    { from: "server", to: "server", label: "role=user ✗", tone: "bad" },
+    { from: "server", to: "ali", label: "403 Forbidden", dashed: true, tone: "bad" },
+    null,
+  ],
+}
+
+export const authzAdmin = {
+  title: "Ali is an admin",
+  actors: [
+    { id: "ali", label: "Ali" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Database" },
+  ],
+  steps: [
+    { from: "ali", to: "server", label: "email + password" },
+    { from: "server", to: "server", label: "authN: Ali ✓" },
+    { from: "ali", to: "server", label: "DELETE /users/7" },
+    { from: "server", to: "server", label: "role=admin ✓" },
+    { from: "server", to: "db", label: "delete user 7" },
+    { from: "server", to: "ali", label: "200 OK", dashed: true },
+  ],
+}
+
+export const authzDebug = [
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `argon2.verify(user.password, password)  → true
+req.user = { sub: "42", role: "user" }`,
+    `DELETE /users/7 HTTP/1.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9…`,
+    `authorize("admin")  → "user" is not in ["admin"]`,
+    `HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{ "error": "forbidden" }`,
+    null,
+  ],
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `argon2.verify(user.password, password)  → true
+req.user = { sub: "42", role: "admin" }`,
+    `DELETE /users/7 HTTP/1.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9…`,
+    `authorize("admin")  → ok, next()`,
+    `DELETE FROM users WHERE id = 7;  → 1 row`,
+    `HTTP/1.1 200 OK
+Content-Type: application/json
+
+{ "deleted": 7 }`,
+  ],
+]
+
+<StepDiagram
+  title="Authentication first, then authorization"
+  debug={authzDebug}
+  panels={[authzUser, authzAdmin]}
+  captions={[
+    "Ali submits email + password.",
+    "Authentication: the credentials match, so the server knows this is Ali.",
+    "Ali asks to delete a user.",
+    "Authorization: the server checks Ali's role. Left: role = user, not allowed. Right: role = admin, allowed.",
+    "User → 403 Forbidden. Admin → the delete goes ahead.",
+    "Admin → 200 OK.",
+  ]}
+/>
+
+Ali logs in, and the server confirms "this is Ali." That's authentication. Then Ali tries to delete a user, and the server checks his role. That's authorization.
+
+<Callout type="trap">
+Authentication always happens **before** authorization. You can't check what someone is allowed to do until you know who they are. Failed authentication → **401**. Authenticated but not allowed → **403**.
+</Callout>
+
+## The password problem
+
+<Summary>
+Before OAuth, a travel app that needed your Gmail contacts asked for your Gmail password.
+</Summary>
+
+export const noOauth = {
+  title: "Without OAuth",
+  actors: [
+    { id: "you", label: "You" },
+    { id: "app", label: "Travel App" },
+    { id: "gmail", label: "Gmail" },
+  ],
+  steps: [
+    { from: "app", to: "you", label: "give me password" },
+    { from: "you", to: "app", label: "Gmail password", tone: "bad", state: { app: "your password" } },
+    { from: "app", to: "gmail", label: "login as you" },
+    { from: "gmail", to: "app", label: "access to ALL", dashed: true, tone: "bad", state: { app: "your password\n+ everything" } },
+    { from: "you", to: "you", label: "change password", tone: "bad" },
+  ],
+}
+
+export const withOauth = {
+  title: "With OAuth",
+  actors: [
+    { id: "you", label: "You" },
+    { id: "app", label: "Travel App" },
+    { id: "google", label: "Google" },
+  ],
+  steps: [
+    { from: "app", to: "you", label: "go to Google" },
+    { from: "you", to: "google", label: "approve contacts" },
+    { from: "google", to: "app", label: "token", dashed: true, state: { app: "token:\ncontacts only" } },
+    { from: "app", to: "google", label: "read contacts" },
+    { from: "you", to: "google", label: "revoke token", state: { app: "(token dead)" } },
+  ],
+}
+
+export const delegationDebug = [
+  [
+    `Travel App UI: "Enter your Gmail email and password"`,
+    `POST /connect-gmail HTTP/1.1
+Host: travel.app
+
+{ "email": "ali@gmail.com", "password": "ali-real-password" }`,
+    `IMAP  a1 LOGIN ali@gmail.com ali-real-password`,
+    `a1 OK LOGIN completed
+→ full mailbox: read, send, delete`,
+    `Only way to revoke: change the Gmail password
+→ every other app using it breaks too`,
+  ],
+  [
+    `HTTP/1.1 302 Found
+Location: https://accounts.google.com/o/oauth2/v2/auth
+  ?client_id=travel-app
+  &scope=contacts.readonly
+  &response_type=code
+  &redirect_uri=https://travel.app/callback`,
+    `Google consent screen:
+"Travel App wants to see your contacts"  [Allow]`,
+    `{
+  "access_token": "ya29.a0Af…",
+  "scope": "contacts.readonly",
+  "token_type": "Bearer",
+  "expires_in": 3599
+}`,
+    `GET /v1/people/me/connections HTTP/1.1
+Host: people.googleapis.com
+Authorization: Bearer ya29.a0Af…`,
+    `POST https://oauth2.googleapis.com/revoke?token=ya29.a0Af…
+→ 200 OK  (only this app loses access)`,
+  ],
+]
+
+<StepDiagram
+  title="The delegation problem"
+  debug={delegationDebug}
+  panels={[noOauth, withOauth]}
+  captions={[
+    "Left: the travel app asks for your password. Right: it redirects you to Google instead.",
+    "Left: you hand over your password. Right: you approve one permission, “read contacts”, on Google's own page.",
+    "Left: the app logs in as you. Right: Google gives the app a token, never your password.",
+    "Left: the app can now read, send and delete ALL your email. Right: the token can only read contacts.",
+    "Left: to revoke, you must change your password, which breaks every other app. Right: revoke just this token.",
+  ]}
+/>
+
+- Your password gives access to **everything**.
+- You can't revoke access without changing your password, which breaks every other app.
+- One breach exposes every site where you reused that password.
+- Password fatigue: too many credentials.
+
+How the ideas evolved: passwords → MFA → OAuth (tokens with specific permissions) → JWT (authentication carried in the token) → Zero Trust (verify everything) → passkeys (passwordless, cryptographic proof).
+
+## Password hashing
+
+<Summary>
+Never store plain-text passwords. Store an Argon2 hash.
+</Summary>
+
+If the database is breached, plain-text passwords expose every user. A hash only gives the attacker a string they have to crack.
+
+MD5 and SHA-256 are **fast**, so attackers can try billions of guesses per second. Argon2 is deliberately **slow and memory-hard**, which makes every guess expensive. It also adds a random salt to each password, so identical passwords produce different hashes.
+
+```js
+const argon2 = require('argon2')
+
+// REGISTER: hash and store (salt + settings are saved inside the hash string)
+const hash = await argon2.hash(password)
+await pool.query('INSERT INTO users (email, password) VALUES ($1, $2)', [email, hash])
+
+// LOGIN: verify
+const valid = await argon2.verify(user.password, password)
+if (!valid) throw new AuthError('authentication failed')
+```
+
+## MFA: multi-factor authentication
+
+<Summary>
+MFA requires more than one **type** of proof.
+</Summary>
+
+| Factor | Type | Example |
+| --- | --- | --- |
+| Something you know | Knowledge | Password, PIN |
+| Something you have | Possession | Phone, authenticator app |
+| Something you are | Inherence | Fingerprint, Face ID |
+
+Password ✓ + code from your phone ✓ → login granted.
+
+## Passkeys (WebAuthn)
+
+<Summary>
+A passkey is a key pair made on your device. The server stores only the **public key**. To log in, the device signs a random challenge. There's no password to steal or phish.
+</Summary>
+
+export const passkeySteps = [
+  { from: "browser", to: "server", label: "register: Ali", caption: "Registration. Ali wants to add a passkey." },
+  { from: "server", to: "browser", label: "challenge", dashed: true, caption: "The server sends a random challenge." },
+  { from: "browser", to: "device", label: "create passkey", caption: "The browser asks the device (phone or laptop) to create a passkey for notes.app." },
+  { from: "device", to: "device", label: "Face ID → key pair", state: { device: "private key\n(never leaves)" }, caption: "Ali unlocks with a fingerprint or Face ID. The device creates a key pair, and the private key never leaves it." },
+  { from: "device", to: "browser", label: "public key", dashed: true, caption: "Only the public key comes out." },
+  { from: "browser", to: "server", label: "save public key", state: { server: "Ali → public key" }, caption: "The server stores Ali's public key. Even if the database leaks, a public key is useless to an attacker." },
+  { from: "browser", to: "server", label: "login: Ali", caption: "Login, later on." },
+  { from: "server", to: "browser", label: "new challenge", dashed: true, caption: "A fresh random challenge every time, so an old signature can't be replayed." },
+  { from: "browser", to: "device", label: "sign challenge", caption: "The browser asks the device to sign it, but only for the real notes.app origin." },
+  { from: "device", to: "device", label: "Face ID → sign", caption: "Ali unlocks the device again, and it signs the challenge with the private key." },
+  { from: "device", to: "browser", label: "signature", dashed: true, caption: "The signature goes back to the browser." },
+  { from: "browser", to: "server", label: "signature", caption: "...and on to the server." },
+  { from: "server", to: "server", label: "verify ✓", caption: "The server verifies the signature with the stored public key." },
+  { from: "server", to: "browser", label: "200 logged in", dashed: true, caption: "Ali is logged in, and no password was ever typed or sent." },
+]
+
+export const passkeyDebug = [
+  `POST /webauthn/register/options HTTP/1.1
+
+{ "email": "ali@notes.app" }`,
+  `HTTP/1.1 200 OK
+
+{ "challenge": "k3Jd9QxT…", "rp": { "id": "notes.app" },
+  "user": { "name": "ali@notes.app" } }`,
+  `navigator.credentials.create({ publicKey: { challenge, rp, user,
+  pubKeyCredParams: [{ type: "public-key", alg: -7 }] } })`,
+  `authenticator: user verified (biometric)
+creates an ES256 key pair, bound to rp.id = "notes.app"`,
+  `PublicKeyCredential { id: "cred_8Hf…",
+  response: { attestationObject, clientDataJSON } }`,
+  `POST /webauthn/register HTTP/1.1
+
+{ "id": "cred_8Hf…", "publicKey": "MFkwEwYHKoZIzj0…" }
+→ INSERT INTO passkeys (user_id, credential_id, public_key)`,
+  `POST /webauthn/login/options HTTP/1.1
+
+{ "email": "ali@notes.app" }`,
+  `HTTP/1.1 200 OK
+
+{ "challenge": "Zq71pLw0…", "allowCredentials": [{ "id": "cred_8Hf…" }] }`,
+  `navigator.credentials.get({ publicKey: { challenge, allowCredentials } })`,
+  `authenticator: user verified
+signs (authenticatorData + hash(clientDataJSON)) with the private key`,
+  `{ id: "cred_8Hf…", response: { signature: "MEUCIQDx…",
+  clientDataJSON, authenticatorData } }`,
+  `POST /webauthn/login HTTP/1.1
+
+{ "id": "cred_8Hf…", "signature": "MEUCIQDx…", … }`,
+  `verify(signature, storedPublicKey)  → true
+clientData.challenge matches ✓   clientData.origin = https://notes.app ✓`,
+  `HTTP/1.1 200 OK
+Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax`,
+]
+
+<StepDiagram
+  title="Passkey registration and login"
+  debug={passkeyDebug}
+  actors={[
+    { id: "device", label: "Device", sub: "phone / laptop" },
+    { id: "browser", label: "Browser" },
+    { id: "server", label: "Server" },
+  ]}
+  steps={passkeySteps}
+/>
+
+- **Phishing-resistant:** the browser only lets the passkey sign for the site it was created for (`notes.app`), so a fake `n0tes.app` gets nothing.
+- **Nothing to leak:** the server holds public keys only.
+- **Two factors in one:** something you have (the device) + something you are or know (Face ID, PIN). The biometric never leaves the device.
+
+<Callout type="trap">
+"Does the server receive my fingerprint?" No. The biometric only unlocks the private key on the device. The server only ever sees a signature.
+</Callout>
+
+## HTTP is stateless
+
+<Summary>
+HTTP doesn't remember you. Every request needs to carry proof of identity.
+</Summary>
+
+Request 1, 2 and 3 each arrive with the server asking "who is this?" After login, something has to carry the proof. There are two solutions:
+
+- **Session (stateful):** the server remembers you.
+- **JWT (stateless):** the token carries the proof.
+
+## Session-based authentication
+
+<Summary>
+The server stores the session in Redis. The browser holds only the session ID, in a cookie.
+</Summary>
+
+1. The user logs in with email + password, and the server verifies them.
+2. The server creates a session ID `abc123` and stores `abc123 → { userId: 42 }` in Redis.
+3. The session ID goes to the browser in a cookie.
+4. On the next request, the browser sends the cookie automatically. The server looks up Redis and knows it's user 42.
+
+```js
+// LOGIN (after verifying the password)
+const sessionId = crypto.randomUUID()
+await redis.setex(`session:${sessionId}`, 1800, JSON.stringify({ userId: user.id, role: user.role }))
+res.cookie('sessionId', sessionId, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 1800000 })
+
+// PROTECTED ROUTE
+const data = await redis.get(`session:${req.cookies.sessionId}`)
+if (!data) return res.status(401).json({ error: 'authentication failed' })
+
+// LOGOUT: instant revocation
+await redis.del(`session:${req.cookies.sessionId}`)
+```
+
+**Stateful in distributed systems.** If the session is stored in one server's memory, a request that lands on another server fails. The fix is a **shared Redis** that every server reads from.
+
+export const memPanel = {
+  title: "Session in server memory",
+  actors: [
+    { id: "browser", label: "Browser" },
+    { id: "s1", label: "Server 1" },
+    { id: "s2", label: "Server 2" },
+  ],
+  steps: [
+    { from: "browser", to: "s1", label: "POST /login" },
+    { from: "s1", to: "s1", label: "save in memory", state: { s1: "abc123 → 42" } },
+    { from: "s1", to: "browser", label: "cookie abc123", dashed: true },
+    { from: "browser", to: "s2", label: "GET /profile" },
+    { from: "s2", to: "s2", label: "abc123? ✗", tone: "bad", state: { s2: "(nothing)" } },
+    null,
+    { from: "s2", to: "browser", label: "401", dashed: true, tone: "bad" },
+  ],
+}
+
+export const redisPanel = {
+  title: "Shared Redis",
+  actors: [
+    { id: "browser", label: "Browser" },
+    { id: "s1", label: "Server 1" },
+    { id: "s2", label: "Server 2" },
+    { id: "redis", label: "Redis" },
+  ],
+  steps: [
+    { from: "browser", to: "s1", label: "POST /login" },
+    { from: "s1", to: "redis", label: "SET abc123", state: { redis: "abc123 → 42" } },
+    { from: "s1", to: "browser", label: "cookie abc123", dashed: true },
+    { from: "browser", to: "s2", label: "GET /profile" },
+    { from: "s2", to: "redis", label: "GET abc123" },
+    { from: "redis", to: "s2", label: "userId 42", dashed: true },
+    { from: "s2", to: "browser", label: "200", dashed: true },
+  ],
+}
+
+export const multiServerDebug = [
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `sessions["abc123"] = { userId: 42 }   // Server 1 RAM only`,
+    `HTTP/1.1 200 OK
+Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
+    `GET /profile HTTP/1.1
+Cookie: sessionId=abc123`,
+    `sessions["abc123"]  → undefined   // Server 2 RAM is empty`,
+    null,
+    `HTTP/1.1 401 Unauthorized
+
+{ "error": "authentication failed" }`,
+  ],
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `redis> SETEX session:abc123 1800 '{"userId":42}'
+OK`,
+    `HTTP/1.1 200 OK
+Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
+    `GET /profile HTTP/1.1
+Cookie: sessionId=abc123`,
+    `redis> GET session:abc123`,
+    `"{\"userId\":42}"`,
+    `HTTP/1.1 200 OK
+
+{ "userId": 42 }`,
+  ],
+]
+
+<StepDiagram
+  title="Sessions across multiple servers"
+  debug={multiServerDebug}
+  panels={[memPanel, redisPanel]}
+  captions={[
+    "The user logs in, and the load balancer sends the request to Server 1.",
+    "Left: Server 1 keeps the session in its own memory. Right: Server 1 writes it to the shared Redis.",
+    "Both: the browser gets the cookie sessionId=abc123.",
+    "The next request lands on Server 2.",
+    "Left: Server 2 has never seen abc123. Right: Server 2 asks Redis.",
+    "Right: Redis answers with user 42.",
+    "Left: 401, and the user is “logged out” for no reason. Right: 200, because every server reads from the same place.",
+  ]}
+/>
+
+## JWT: JSON Web Tokens
+
+<Summary>
+The client carries a signed token with the claims inside. The server verifies the signature locally, with no lookup.
+</Summary>
+
+A JWT is `HEADER.PAYLOAD.SIGNATURE`, with each part base64url-encoded:
+
+- **Header:** `{ "alg": "HS256", "typ": "JWT" }`
+- **Payload:** `{ "sub": "42", "role": "user", "exp": 1799999999, "iat": 1700000000 }`
+- **Signature:** `HMACSHA256(base64url(header) + "." + base64url(payload), SECRET_KEY)`
+
+Paste a JWT below. The payload decodes without any key:
+
+<JwtDecoder />
+
+The payload is readable, but it can't be changed without the secret:
+
+<JwtTamper />
+
+<Callout type="trap">
+The JWT payload is **encoded, not encrypted**. Anyone can decode it. Never put passwords or secrets in it: only the user ID, role and expiration.
+</Callout>
+
+```js
+// LOGIN: create a JWT
+const token = jwt.sign({ sub: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '15m' })
+
+// MIDDLEWARE: verify on every protected request
+function authenticate(req, res, next) {
+  try {
+    const token = req.headers.authorization.split(' ')[1] // "Bearer <token>"
+    req.user = jwt.verify(token, process.env.JWT_SECRET)
+  } catch {
+    return res.status(401).json({ error: 'authentication failed' })
+  }
+  next()
+}
+```
+
+**Why is it called stateless?** A session needs a Redis lookup on every request. A JWT has the claims inside the token, so the server only checks the signature.
+
+| Pros | Cons |
+| --- | --- |
+| No session storage needed | Hard to revoke immediately |
+| Works across distributed servers | A stolen token is valid until it expires |
+| Great for microservices | Payload is visible (not encrypted) |
+| Portable between services | Tokens can grow large |
+
+**Microservices: HS256 vs RS256.** With HS256, the same secret signs *and* verifies, so every service holds the signing secret, and one compromised service can create tokens. Prefer **RS256/ES256**: only the auth service signs, with a private key, and the other services verify with the public key.
+
+## Sessions vs JWT
+
+<Summary>
+Session: the server stores state, and revoking is easy. JWT: the token carries state, and scaling is easy.
+</Summary>
+
+export const sessionPanel = {
+  title: "Session (stateful)",
+  actors: [
+    { id: "browser", label: "Browser" },
+    { id: "server", label: "Server" },
+    { id: "redis", label: "Redis" },
+  ],
+  steps: [
+    { from: "browser", to: "server", label: "POST /login" },
+    { from: "server", to: "redis", label: "SET sess:abc123", state: { redis: "abc123 →\n{userId:42}" } },
+    { from: "server", to: "browser", label: "Set-Cookie: abc123", dashed: true, state: { browser: "cookie:\nabc123" } },
+    { from: "browser", to: "server", label: "GET /profile" },
+    { from: "server", to: "redis", label: "GET sess:abc123" },
+    { from: "redis", to: "server", label: "{userId:42}", dashed: true },
+    { from: "server", to: "browser", label: "200 profile", dashed: true },
+    { from: "server", to: "redis", label: "DEL sess:abc123", state: { redis: "(deleted)" } },
+  ],
+}
+
+export const jwtPanel = {
+  title: "JWT (stateless)",
+  actors: [
+    { id: "client", label: "Client" },
+    { id: "server", label: "Server" },
+    { id: "store", label: "No store", sub: "(nothing here)" },
+  ],
+  steps: [
+    { from: "client", to: "server", label: "POST /login" },
+    { from: "server", to: "server", label: "sign JWT", state: { store: "(empty)" } },
+    { from: "server", to: "client", label: "token eyJ…", dashed: true, state: { client: "JWT with\nsub, role, exp" } },
+    { from: "client", to: "server", label: "GET /profile" },
+    { from: "server", to: "server", label: "verify signature" },
+    null,
+    { from: "server", to: "client", label: "200 profile", dashed: true },
+    { from: "server", to: "server", label: "can't revoke", state: { client: "JWT still\nvalid until exp" } },
+  ],
+}
+
+export const sessionJwtDebug = [
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `redis> SETEX sess:abc123 1800 '{"userId":42}'
+OK`,
+    `HTTP/1.1 200 OK
+Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax; Max-Age=1800`,
+    `GET /profile HTTP/1.1
+Cookie: sessionId=abc123`,
+    `redis> GET sess:abc123`,
+    `"{\"userId\":42}"`,
+    `HTTP/1.1 200 OK
+
+{ "userId": 42 }`,
+    `redis> DEL sess:abc123
+(integer) 1   → session gone instantly`,
+  ],
+  [
+    `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+    `jwt.sign({ sub: "42", role: "user" }, SECRET, { expiresIn: "15m" })`,
+    `HTTP/1.1 200 OK
+
+{ "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiJ9.Sfl…" }`,
+    `GET /profile HTTP/1.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9…`,
+    `jwt.verify(token, SECRET)
+→ { sub: "42", role: "user", exp: 1799999999 }   // no Redis call`,
+    null,
+    `HTTP/1.1 200 OK
+
+{ "userId": "42" }`,
+    `// nothing to delete on the server
+// the token keeps working until exp`,
+  ],
+]
+
+<StepDiagram
+  title="Where does state live on each request?"
+  debug={sessionJwtDebug}
+  panels={[sessionPanel, jwtPanel]}
+  captions={[
+    "Both start the same way: the client sends credentials to POST /login.",
+    "Session: the server writes the session into Redis. JWT: the server signs a token and stores nothing.",
+    "Session: the browser gets only an ID in a cookie. JWT: the client gets the whole token, with the claims inside.",
+    "Next request. Session: the browser sends the cookie automatically. JWT: the client sends Authorization: Bearer eyJ…",
+    "Session: the server asks Redis who abc123 is. JWT: the server checks the signature in memory.",
+    "Session: Redis answers, which is one lookup on every request. JWT: no lookup at all.",
+    "Both respond 200.",
+    "Logout. Session: delete the key, and it's dead instantly. JWT: nothing to delete, so the token works until it expires.",
+  ]}
+/>
+
+| Property | Session (stateful) | JWT (stateless) |
+| --- | --- | --- |
+| Server stores state | Yes (Redis) | No |
+| Client carries | Session ID only | Full token with claims |
+| Revoke immediately | Yes: delete from Redis | Hard: needs a blocklist |
+| Distributed systems | Needs shared Redis | Any server verifies locally |
+| Microservices | Complicated | Natural fit |
+| Token theft | Delete the session | Valid until expiry |
+| Best for | Web apps, single region | APIs, microservices, distributed |
+| Infrastructure | Redis required | Just a key |
+
+## Hybrid: short JWT + refresh token
+
+<Summary>
+Short JWT (15 min) for speed + refresh token (30 days, in Redis) for control. This is the production answer.
+</Summary>
+
+export const hybridSteps = [
+  { from: "user", to: "api", label: "POST /login", caption: "Ali logs in." },
+  { from: "api", to: "redis", label: "store RT1 · family F", state: { redis: "F: active\nRT1: unused" }, caption: "The server starts token family F and stores refresh token RT1 in Redis." },
+  { from: "api", to: "user", label: "access JWT + RT1", dashed: true, state: { user: "JWT (15 min)\nRT1" }, caption: "Ali gets a 15-minute access JWT and refresh token RT1." },
+  { from: "user", to: "api", label: "GET /notes + JWT", caption: "Normal requests send only the access JWT." },
+  { from: "api", to: "api", label: "verify JWT locally", caption: "No Redis lookup. This is the fast path." },
+  { from: "user", to: "attacker", label: "RT1 copied", tone: "bad", state: { attacker: "RT1 (stolen)" }, caption: "An attacker steals RT1." },
+  { from: "user", to: "api", label: "POST /refresh (RT1)", caption: "The JWT expires, and Ali's app refreshes with RT1." },
+  { from: "api", to: "redis", label: "RT1 used, add RT2", state: { redis: "F: active\nRT1: used\nRT2: unused" }, caption: "The server marks RT1 as USED (it doesn't delete it) and stores RT2 in the same family." },
+  { from: "api", to: "user", label: "new JWT + RT2", dashed: true, state: { user: "JWT' (15 min)\nRT2" }, caption: "Ali gets a new JWT and RT2." },
+  { from: "attacker", to: "api", label: "POST /refresh (RT1)", tone: "bad", caption: "The attacker tries RT1, which is already marked used." },
+  { from: "api", to: "redis", label: "reuse → revoke F", tone: "bad", state: { redis: "F: REVOKED\nRT1, RT2: dead" }, caption: "Reuse detected: the server revokes the whole family F." },
+  { from: "api", to: "attacker", label: "401", dashed: true, tone: "bad", state: { attacker: "nothing usable" }, caption: "The attacker is rejected." },
+  { from: "user", to: "api", label: "POST /refresh (RT2)", caption: "Later, Ali's app tries RT2..." },
+  { from: "api", to: "user", label: "401 → log in again", dashed: true, tone: "bad", state: { user: "(logged out)" }, caption: "...which also fails, so Ali logs in again. If the attacker had refreshed first, Ali's reuse of RT1 would have triggered the same revocation." },
+]
+
+export const hybridAttackerFirst = [
+  ...hybridSteps.slice(0, 6),
+  { from: "attacker", to: "api", label: "POST /refresh (RT1)", tone: "bad", caption: "This time the attacker refreshes first, using the stolen RT1." },
+  { from: "api", to: "redis", label: "RT1 used, add RT2", state: { redis: "F: active\nRT1: used\nRT2: unused" }, caption: "The server can't tell it's the attacker. It marks RT1 as used and stores RT2 in family F." },
+  { from: "api", to: "attacker", label: "new JWT + RT2", dashed: true, tone: "bad", state: { attacker: "JWT + RT2" }, caption: "The attacker now has a working JWT and RT2." },
+  { from: "user", to: "api", label: "POST /refresh (RT1)", caption: "Ali's JWT expires, and the app refreshes with RT1, which is now already used." },
+  { from: "api", to: "redis", label: "reuse → revoke F", tone: "bad", state: { redis: "F: REVOKED\nRT1, RT2: dead" }, caption: "Reuse detected: the server revokes the whole family, so the attacker's RT2 dies too." },
+  { from: "api", to: "user", label: "401 → log in again", dashed: true, tone: "bad", state: { user: "(logged out)" }, caption: "Ali logs in again and gets a fresh family." },
+  { from: "attacker", to: "api", label: "POST /refresh (RT2)", tone: "bad", caption: "When the attacker's JWT expires (within 15 min), they try RT2..." },
+  { from: "api", to: "attacker", label: "401", dashed: true, tone: "bad", state: { attacker: "nothing usable" }, caption: "...and it's rejected. Same result either way: the family is revoked." },
+]
+
+export const hybridActors = [
+  { id: "attacker", label: "Attacker" },
+  { id: "user", label: "Ali's app" },
+  { id: "api", label: "API server" },
+  { id: "redis", label: "Redis" },
+]
+
+export const hybridDebugBase = [
+  `POST /login HTTP/1.1
+Content-Type: application/json
+
+{ "email": "ali@notes.app", "password": "••••••" }`,
+  `redis> SET rt:RT1 '{"userId":42,"familyId":"F"}' EX 2592000
+OK`,
+  `HTTP/1.1 200 OK
+Set-Cookie: refreshToken=RT1; HttpOnly; Secure; SameSite=Strict
+
+{ "accessToken": "eyJ…  (expires in 15m)" }`,
+  `GET /notes HTTP/1.1
+Authorization: Bearer eyJ…`,
+  `jwt.verify(accessToken, SECRET)  → ok   // no Redis call`,
+  `// attacker now also holds: refreshToken=RT1`,
+]
+
+export const hybridDebug = [
+  ...hybridDebugBase,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT1`,
+  `redis> SET used:RT1 1 NX EX 2592000
+OK            ← first use
+redis> SET rt:RT2 '{"userId":42,"familyId":"F"}' EX 2592000
+OK`,
+  `HTTP/1.1 200 OK
+Set-Cookie: refreshToken=RT2; HttpOnly; Secure; SameSite=Strict
+
+{ "accessToken": "eyJ…  (new)" }`,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT1`,
+  `redis> SET used:RT1 1 NX EX 2592000
+(nil)         ← already used: REUSE
+redis> SET revoked:F 1 EX 2592000
+OK
+log: WARN refresh token reuse userId=42 family=F`,
+  `HTTP/1.1 401 Unauthorized
+
+{ "error": "invalid" }`,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT2`,
+  `redis> EXISTS revoked:F
+(integer) 1
+HTTP/1.1 401 Unauthorized   → app sends Ali to /login`,
+]
+
+export const hybridDebugAttacker = [
+  ...hybridDebugBase,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT1      (sent by the attacker)`,
+  `redis> SET used:RT1 1 NX EX 2592000
+OK            ← first use (server can't tell who it is)
+redis> SET rt:RT2 '{"userId":42,"familyId":"F"}' EX 2592000
+OK`,
+  `HTTP/1.1 200 OK
+Set-Cookie: refreshToken=RT2
+
+{ "accessToken": "eyJ…" }     → attacker is in, for now`,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT1      (sent by Ali)`,
+  `redis> SET used:RT1 1 NX EX 2592000
+(nil)         ← already used: REUSE
+redis> SET revoked:F 1 EX 2592000
+OK`,
+  `HTTP/1.1 401 Unauthorized   → Ali logs in again`,
+  `POST /refresh HTTP/1.1
+Cookie: refreshToken=RT2      (sent by the attacker)`,
+  `redis> EXISTS revoked:F
+(integer) 1
+HTTP/1.1 401 Unauthorized`,
+]
+
+<StepDiagram
+  title="Refresh token rotation with reuse detection"
+  scenarios={[
+    { label: "Ali refreshes first", actors: hybridActors, steps: hybridSteps, debug: hybridDebug },
+    { label: "Attacker refreshes first", actors: hybridActors, steps: hybridAttackerFirst, debug: hybridDebugAttacker },
+  ]}
+/>
+
+- **Login:** the server issues an access JWT (15 min) and a refresh token (30 days, stored in Redis).
+- **Normal request:** the server verifies the JWT locally, with no Redis. Fast.
+- **JWT expired:** the client sends the refresh token → the server checks Redis → issues a new JWT and a **new** refresh token (rotation).
+- **Logout:** revoke the refresh token. The access JWT still works for up to 15 minutes, which is an accepted trade-off.
+
+**Reuse detection.** Every refresh token from one login belongs to a **family**. When a token is used, it's marked *used*, not deleted. If a used token shows up again, someone stole it, so the server revokes the **whole family**.
+
+
+```js
+async function refresh(token) {
+  const record = JSON.parse(await redis.get(`rt:${token}`)) // { userId, role, familyId }
+  if (!record || (await redis.exists(`revoked:${record.familyId}`))) throw new AuthError('invalid')
+
+  // mark as used; NX fails if it was already used -> reuse detected
+  const firstUse = await redis.set(`used:${token}`, 1, 'EX', THIRTY_DAYS, 'NX')
+  if (!firstUse) {
+    await redis.set(`revoked:${record.familyId}`, 1, 'EX', THIRTY_DAYS) // revoke whole family
+    throw new AuthError('invalid')
+  }
+
+  const newToken = crypto.randomUUID()
+  await redis.set(`rt:${newToken}`, JSON.stringify(record), 'EX', THIRTY_DAYS) // same familyId
+  const accessToken = jwt.sign({ sub: record.userId, role: record.role }, SECRET, { expiresIn: '15m' })
+  return { accessToken, refreshToken: newToken }
+}
+```
+
+## Cookies
+
+<Summary>
+A cookie is not an authentication mechanism. It's a **transport**: browser storage plus automatic sending.
+</Summary>
+
+<CookiePlayground />
+
+A cookie can carry a session ID or a JWT. The mechanism is the session or the JWT; the cookie just carries it.
+
+| Attribute | What it does |
+| --- | --- |
+| `HttpOnly` | JavaScript can't read it. Protects against XSS stealing the token. |
+| `Secure` | Only sent over HTTPS. |
+| `SameSite=Lax` | Not sent on cross-site POSTs or background requests; sent on normal link clicks. Reduces CSRF. |
+| `SameSite=Strict` | Never sent on cross-site requests. Strictest CSRF protection. |
+| `MaxAge` | How long the cookie lives. |
+
+```js
+res.cookie('sessionId', sessionId, {
+  httpOnly: true, // JS can't read it
+  secure: true, // HTTPS only
+  sameSite: 'lax', // CSRF protection
+  maxAge: 1800000, // 30 minutes
+})
+```
+
+**Cookie vs Authorization header**
+
+- **Cookie (browser apps):** sent automatically. HttpOnly protects against XSS, and SameSite against CSRF.
+- **Authorization header (mobile, machine to machine):** `Authorization: Bearer eyJ…`, set manually. There's no CSRF risk because it's never sent automatically.
+
+<Callout type="trap">
+"What's the difference between a session and a cookie?" A session is the **authentication mechanism** (state on the server). A cookie is the **transport** (the browser stores and sends it). They're different layers.
+</Callout>
+
+## CSRF tokens
+
+<Summary>
+The browser attaches cookies to **every** request to your site, even one started by evil.com. A CSRF token is a secret value the attacker's page can't read, so forged requests fail.
+</Summary>
+
+export const csrfNoToken = {
+  title: "No CSRF token",
+  actors: [
+    { id: "evil", label: "evil.com" },
+    { id: "browser", label: "Ali's browser" },
+    { id: "api", label: "notes.app" },
+  ],
+  steps: [
+    { from: "browser", to: "evil", label: "open evil.com" },
+    { from: "evil", to: "browser", label: "hidden form", dashed: true, tone: "bad" },
+    { from: "browser", to: "api", label: "POST + cookie", tone: "bad" },
+    { from: "api", to: "api", label: "cookie ok ✓" },
+    { from: "api", to: "browser", label: "200 deleted", dashed: true, tone: "bad", state: { api: "note 7 DELETED" } },
+  ],
+}
+
+export const csrfWithToken = {
+  title: "With CSRF token",
+  actors: csrfNoToken.actors,
+  steps: [
+    { from: "browser", to: "evil", label: "open evil.com" },
+    { from: "evil", to: "browser", label: "hidden form", dashed: true, tone: "bad" },
+    { from: "browser", to: "api", label: "POST + cookie", tone: "bad" },
+    { from: "api", to: "api", label: "token? ✗", tone: "bad" },
+    { from: "api", to: "browser", label: "403", dashed: true, state: { api: "note 7 safe" } },
+  ],
+}
+
+<StepDiagram
+  title="Cross-site request forgery"
+  panels={[csrfNoToken, csrfWithToken]}
+  captions={[
+    "Ali is logged in to notes.app, then opens evil.com in another tab.",
+    "evil.com's page contains a hidden form that auto-submits to notes.app.",
+    "The browser sends the POST to notes.app and attaches Ali's session cookie automatically.",
+    "Left: the server only checks the cookie, and it's valid. Right: the server also requires a CSRF token, which evil.com doesn't have.",
+    "Left: the note is deleted in Ali's name. Right: 403, nothing happens.",
+  ]}
+  debug={[
+    [
+      `GET / HTTP/1.1
+Host: evil.com`,
+      `<form action="https://notes.app/notes/7/delete" method="POST"></form>
+<script>document.forms[0].submit()</script>`,
+      `POST /notes/7/delete HTTP/1.1
+Host: notes.app
+Origin: https://evil.com
+Cookie: sessionId=abc123      ← attached by the browser`,
+      `session abc123 → Ali ✓   (nothing else is checked)`,
+      `HTTP/1.1 200 OK
+
+{ "deleted": 7 }`,
+    ],
+    [
+      `GET / HTTP/1.1
+Host: evil.com`,
+      `<form action="https://notes.app/notes/7/delete" method="POST"></form>
+<script>document.forms[0].submit()</script>`,
+      `POST /notes/7/delete HTTP/1.1
+Host: notes.app
+Origin: https://evil.com
+Cookie: sessionId=abc123`,
+      `session ✓
+X-CSRF-Token header → (missing)
+expected: "9fK2c1…"  ✗`,
+      `HTTP/1.1 403 Forbidden
+
+{ "error": "invalid csrf token" }`,
+    ],
+  ]}
+/>
+
+The server creates a random token per session and gives it to its own frontend. The frontend sends it back in a header on every state-changing request. evil.com can make the browser *send* requests, but the browser won't let it *read* notes.app's pages, so it can never learn the token.
+
+`SameSite=Lax` already blocks this cross-site POST in modern browsers. CSRF tokens are the second layer. Also, never change state with GET.
+
+```js
+// at login: a random token tied to the session
+req.session.csrfToken = crypto.randomBytes(32).toString('hex')
+
+// frontend: send it back on every POST / PUT / PATCH / DELETE
+fetch('/notes/7/delete', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken } })
+
+// middleware
+function csrf(req, res, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next()
+  if (req.get('X-CSRF-Token') !== req.session.csrfToken) {
+    return res.status(403).json({ error: 'invalid csrf token' })
+  }
+  next()
+}
+```
+
+<Callout type="trap">
+CSRF only exists with **cookie** auth, because cookies are sent automatically. A token in the `Authorization` header is never attached automatically, so it can't be forged this way.
+</Callout>
+
+## OAuth 1.0 and OAuth 2.0
+
+<Summary>
+OAuth = tokens with specific permissions instead of passwords. OAuth 2.0 is **authorization only**.
+</Summary>
+
+**OAuth 1.0** solved delegation: the travel app redirects you to Google, you approve "read contacts," and the app gets a token for contacts only. You never gave your password, and you can revoke the token anytime. But it needed complex cryptographic signatures on every request.
+
+**OAuth 2.0** simplified it with **bearer tokens** (no per-request signatures) and different flows:
+
+| Flow | When to use |
+| --- | --- |
+| Authorization Code (+ PKCE) | Web, mobile and browser apps: the most common and most secure |
+| Client Credentials | Machine to machine, no user involved |
+| Device Code | TVs, CLIs, devices with no browser |
+| Implicit | Old and deprecated; replaced by Authorization Code + PKCE |
+
+| Component | What it is |
+| --- | --- |
+| Resource Owner | You, the user |
+| Client | The app that wants access (travel app) |
+| Resource Server | The server holding your data (Gmail) |
+| Authorization Server | The server that issues tokens (Google auth) |
+
+**Bearer token:** whoever *bears* (carries) the token gets access. The server doesn't check who is holding it, only that it's valid. That's why a stolen bearer token is dangerous.
+
+<Callout type="trap">
+OAuth 2.0 answers "what can this app access?", **not** "who is the user?" That gap is filled by OpenID Connect.
+</Callout>
+
+## PKCE
+
+<Summary>
+PKCE (Proof Key for Code Exchange) makes a stolen authorization code useless: at the token exchange, the app must prove it's the same app that started the login.
+</Summary>
+
+export const pkceSteps = (withPkce) => [
+  withPkce
+    ? { from: "app", to: "app", label: "verifier + challenge", state: { app: "code_verifier\n(secret)" } }
+    : { from: "app", to: "app", label: "nothing extra" },
+  { from: "app", to: "google", label: withPkce ? "authorize + challenge" : "authorize" },
+  { from: "google", to: "attacker", label: "code intercepted", dashed: true, tone: "bad", state: { attacker: "code" } },
+  { from: "attacker", to: "google", label: "POST /token + code", tone: "bad" },
+  withPkce
+    ? { from: "google", to: "google", label: "verifier? ✗", tone: "bad" }
+    : { from: "google", to: "attacker", label: "tokens!", dashed: true, tone: "bad", state: { attacker: "code\naccess_token" } },
+  withPkce ? { from: "google", to: "attacker", label: "400 invalid_grant", dashed: true } : null,
+]
+
+export const pkceActors = [
+  { id: "app", label: "Notes app" },
+  { id: "google", label: "Google" },
+  { id: "attacker", label: "Attacker" },
+]
+
+<StepDiagram
+  title="Stolen authorization code: without vs with PKCE"
+  panels={[
+    { title: "Without PKCE", actors: pkceActors, steps: pkceSteps(false) },
+    { title: "With PKCE", actors: pkceActors, steps: pkceSteps(true) },
+  ]}
+  captions={[
+    "Right: before redirecting, the app creates a random code_verifier (kept secret) and its SHA-256 hash, the code_challenge.",
+    "The app sends the user to Google's authorize endpoint. Right: it includes only the challenge (the hash).",
+    "A malicious app on the phone (registered for the same redirect) intercepts the authorization code.",
+    "The attacker tries to exchange the stolen code for tokens.",
+    "Left: Google hands over the tokens, and the attacker is in. Right: Google demands the code_verifier that hashes to the challenge, and the attacker doesn't have it.",
+    "Right: 400 invalid_grant. The stolen code is worthless.",
+  ]}
+  debug={[
+    [
+      `// no PKCE: nothing extra is generated`,
+      `GET /authorize?client_id=notes-app&response_type=code
+  &redirect_uri=notesapp://callback&scope=openid email`,
+      `HTTP/1.1 302 Found
+Location: notesapp://callback?code=4/0AY0e-g7Qx
+// a malicious app registered notesapp:// too and grabs the code`,
+      `POST /token HTTP/1.1
+Host: oauth2.googleapis.com
+
+grant_type=authorization_code&code=4/0AY0e-g7Qx&client_id=notes-app`,
+      `HTTP/1.1 200 OK
+
+{ "access_token": "ya29.a0Af…", "id_token": "eyJ…" }   ← attacker is in`,
+      null,
+    ],
+    [
+      `code_verifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"   (secret)
+code_challenge = BASE64URL(SHA256(verifier))
+               = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"`,
+      `GET /authorize?client_id=notes-app&response_type=code
+  &redirect_uri=notesapp://callback&scope=openid email
+  &code_challenge=E9Melhoa2Ow…&code_challenge_method=S256`,
+      `HTTP/1.1 302 Found
+Location: notesapp://callback?code=4/0AY0e-g7Qx
+// a malicious app registered notesapp:// too and grabs the code`,
+      `POST /token HTTP/1.1
+Host: oauth2.googleapis.com
+
+grant_type=authorization_code&code=4/0AY0e-g7Qx&client_id=notes-app
+// no code_verifier: the attacker never had it`,
+      `check: BASE64URL(SHA256(code_verifier)) === code_challenge
+code_verifier missing  → reject`,
+      `HTTP/1.1 400 Bad Request
+
+{ "error": "invalid_grant" }`,
+    ],
+  ]}
+/>
+
+Mobile apps and SPAs can't keep a client secret (anyone can unpack the app), so PKCE replaces the secret with a one-time proof. It's now recommended for **every** Authorization Code flow.
+
+```js
+const verifier = crypto.randomBytes(32).toString('base64url')                  // keep secret
+const challenge = crypto.createHash('sha256').update(verifier).digest('base64url')
+
+// 1. redirect: /authorize?...&code_challenge=${challenge}&code_challenge_method=S256
+// 2. exchange: POST /token ... &code=${code}&code_verifier=${verifier}
+```
+
+## OpenID Connect (OIDC)
+
+<Summary>
+OIDC = OAuth 2.0 + identity. It adds an **ID token** (a JWT that says who you are). It powers "Sign in with Google."
+</Summary>
+
+export const oidcSteps = [
+  { from: "browser", to: "app", label: "Sign in with Google", caption: "Ali clicks “Sign in with Google” on the note-taking app." },
+  { from: "app", to: "browser", label: "302 → Google", dashed: true, caption: "The app redirects Ali to Google's authorization server." },
+  { from: "browser", to: "google", label: "GET /authorize?…", caption: "The browser opens Google's login page." },
+  { from: "google", to: "google", label: "login + consent", caption: "Ali logs in to Google and approves the permissions." },
+  { from: "google", to: "browser", label: "302 ?code=…", dashed: true, state: { browser: "code only" }, caption: "Google redirects back with ONLY an authorization code. No tokens yet." },
+  { from: "browser", to: "app", label: "GET /callback?code", caption: "The browser hands the code to the app's server." },
+  { from: "app", to: "google", label: "POST /token (code)", caption: "The app's server exchanges the code at Google's token endpoint, using its client secret." },
+  { from: "google", to: "app", label: "id + access tokens", dashed: true, state: { app: "id_token,\naccess_token" }, caption: "Now Google returns the ID token (who Ali is) and the access token (what the app can access)." },
+  { from: "app", to: "app", label: "verify id_token", caption: "The app verifies the ID token and now knows WHO the user is." },
+  { from: "app", to: "browser", label: "logged in", dashed: true, caption: "Ali is signed in to the note-taking app." },
+  { from: "app", to: "api", label: "Bearer access_token", caption: "The app can call Google APIs on Ali's behalf with the access token." },
+  { from: "api", to: "app", label: "data", dashed: true, caption: "Google APIs return only what was approved." },
+]
+
+export const oidcDebug = [
+  `GET /auth/google HTTP/1.1
+Host: notes.app`,
+  `HTTP/1.1 302 Found
+Location: https://accounts.google.com/o/oauth2/v2/auth
+  ?client_id=notes-app
+  &redirect_uri=https://notes.app/callback
+  &response_type=code
+  &scope=openid email profile
+  &state=x7Kq2`,
+  `GET /o/oauth2/v2/auth?client_id=notes-app&…&state=x7Kq2 HTTP/1.1
+Host: accounts.google.com`,
+  `Google login page, then consent:
+"Notes app wants your name, email and profile picture"  [Allow]`,
+  `HTTP/1.1 302 Found
+Location: https://notes.app/callback?code=4/0AY0e-g7Qx&state=x7Kq2
+
+// only a short-lived code. No tokens in the URL.`,
+  `GET /callback?code=4/0AY0e-g7Qx&state=x7Kq2 HTTP/1.1
+Host: notes.app`,
+  `POST /token HTTP/1.1
+Host: oauth2.googleapis.com
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=4/0AY0e-g7Qx
+&client_id=notes-app
+&client_secret=••••••
+&redirect_uri=https://notes.app/callback`,
+  `HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "id_token": "eyJhbGciOiJSUzI1NiIs…",
+  "access_token": "ya29.a0Af…",
+  "token_type": "Bearer",
+  "expires_in": 3599
+}`,
+  `verify id_token (signature, iss, aud, exp)  → ok
+{ "sub": "google-user-123", "email": "ali@gmail.com",
+  "iss": "https://accounts.google.com", "aud": "notes-app" }`,
+  `HTTP/1.1 302 Found
+Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax
+Location: /notes`,
+  `GET /oauth2/v3/userinfo HTTP/1.1
+Host: www.googleapis.com
+Authorization: Bearer ya29.a0Af…`,
+  `HTTP/1.1 200 OK
+
+{ "sub": "google-user-123", "name": "Ali Ahmed", "email": "ali@gmail.com" }`,
+]
+
+<StepDiagram
+  title="Sign in with Google (Authorization Code flow)"
+  debug={oidcDebug}
+  actors={[
+    { id: "browser", label: "Browser", sub: "Ali" },
+    { id: "app", label: "Notes app", sub: "server" },
+    { id: "google", label: "Google", sub: "auth server" },
+    { id: "api", label: "Google APIs" },
+  ]}
+  steps={oidcSteps}
+/>
+
+OAuth 2.0 gives an **access token** (what the app can do). OIDC adds an **ID token** (who the user is):
+
+```json
+{
+  "sub": "google-user-123",
+  "name": "Ali Ahmed",
+  "email": "ali@gmail.com",
+  "iss": "https://accounts.google.com",
+  "aud": "your-client-id",
+  "iat": 1700000000,
+  "exp": 1700003600
+}
+```
+
+Google redirects back with **only an authorization code**. The ID token and access token come back when the app's server exchanges that code with Google's token endpoint.
+
+
+OAuth 2.0 alone: "this app can read your Google Drive." OIDC on top: "...and the user is Ali, ali@gmail.com."
+
+## SSO and SAML
+
+<Summary>
+SSO (single sign-on) = log in once at a central **identity provider (IdP)**, and every connected app lets you in. SAML is the older XML protocol for it; OIDC is the modern JSON/JWT one.
+</Summary>
+
+export const ssoSteps = [
+  { from: "browser", to: "notes", label: "GET /notes", caption: "Ali opens the company's notes app." },
+  { from: "notes", to: "browser", label: "302 + SAMLRequest", dashed: true, caption: "The notes app (the Service Provider, SP) doesn't log users in itself. It redirects Ali to the company IdP with a SAMLRequest." },
+  { from: "browser", to: "idp", label: "GET /sso?SAMLRequest", caption: "The browser lands on the IdP (e.g. Okta or Entra ID)." },
+  { from: "idp", to: "idp", label: "Ali logs in", state: { idp: "session: Ali" }, caption: "Ali logs in once at the IdP (password + MFA). The IdP now has its own session for Ali." },
+  { from: "idp", to: "browser", label: "form: SAMLResponse", dashed: true, caption: "The IdP returns an auto-submitting HTML form containing a signed XML assertion: “this is Ali, ali@corp.com”." },
+  { from: "browser", to: "notes", label: "POST /acs", caption: "The browser posts the assertion to the notes app's ACS (Assertion Consumer Service) URL." },
+  { from: "notes", to: "notes", label: "verify signature", caption: "The notes app verifies the XML signature with the IdP's certificate (exchanged in advance as metadata), plus the audience and expiry." },
+  { from: "notes", to: "browser", label: "Set-Cookie: session", dashed: true, state: { browser: "notes session" }, caption: "Ali is logged in to notes." },
+  { from: "browser", to: "wiki", label: "GET /wiki", caption: "Later, Ali opens a second app, the company wiki." },
+  { from: "wiki", to: "browser", label: "302 → IdP", dashed: true, caption: "The wiki also redirects to the IdP." },
+  { from: "browser", to: "idp", label: "GET /sso?SAMLRequest", caption: "The browser goes to the IdP, which still has Ali's session." },
+  { from: "idp", to: "idp", label: "already logged in ✓", caption: "No password prompt this time. That's the “single” in single sign-on." },
+  { from: "idp", to: "browser", label: "SAMLResponse", dashed: true, caption: "The IdP immediately issues an assertion for the wiki." },
+  { from: "browser", to: "wiki", label: "POST /acs", state: { browser: "notes + wiki\nsessions" }, caption: "Ali is in the wiki without typing anything. Disable Ali at the IdP, and every app loses access." },
+]
+
+export const ssoDebug = [
+  `GET /notes HTTP/1.1
+Host: notes.corp.com`,
+  `HTTP/1.1 302 Found
+Location: https://corp.okta.com/sso/saml?SAMLRequest=fZJNT8Mw…&RelayState=/notes`,
+  `GET /sso/saml?SAMLRequest=fZJNT8Mw… HTTP/1.1
+Host: corp.okta.com`,
+  `IdP login page → password ✓ → MFA push ✓
+IdP session cookie set for corp.okta.com`,
+  `<form method="POST" action="https://notes.corp.com/saml/acs">
+  <input name="SAMLResponse" value="PHNhbWxwOlJlc3BvbnNl…">
+</form><script>document.forms[0].submit()</script>`,
+  `POST /saml/acs HTTP/1.1
+Host: notes.corp.com
+
+SAMLResponse (base64-decoded):
+<saml:Assertion>
+  <saml:Issuer>https://corp.okta.com</saml:Issuer>
+  <ds:Signature>…</ds:Signature>
+  <saml:Subject><saml:NameID>ali@corp.com</saml:NameID></saml:Subject>
+  <saml:Conditions NotOnOrAfter="2026-09-28T10:05:00Z">
+    <saml:AudienceRestriction><saml:Audience>notes.corp.com</saml:Audience>…
+</saml:Assertion>`,
+  `verify XML signature with the IdP certificate ✓
+Audience = notes.corp.com ✓   NotOnOrAfter in the future ✓`,
+  `HTTP/1.1 302 Found
+Set-Cookie: sessionId=n0t3s…; HttpOnly; Secure
+Location: /notes`,
+  `GET /wiki HTTP/1.1
+Host: wiki.corp.com`,
+  `HTTP/1.1 302 Found
+Location: https://corp.okta.com/sso/saml?SAMLRequest=nVNNj9Ew…`,
+  `GET /sso/saml?SAMLRequest=nVNNj9Ew… HTTP/1.1
+Host: corp.okta.com
+Cookie: idp_session=…      ← Ali's IdP session`,
+  `IdP session valid → skip the login page`,
+  `<form method="POST" action="https://wiki.corp.com/saml/acs">
+  <input name="SAMLResponse" value="PHNhbWxwOlJlc3Bv…">`,
+  `POST /saml/acs HTTP/1.1
+Host: wiki.corp.com
+→ Audience = wiki.corp.com ✓ → Set-Cookie: wiki session`,
+]
+
+<StepDiagram
+  title="SSO with SAML: log in once, use many apps"
+  debug={ssoDebug}
+  actors={[
+    { id: "browser", label: "Browser", sub: "Ali" },
+    { id: "notes", label: "Notes app", sub: "SP" },
+    { id: "idp", label: "IdP", sub: "Okta / Entra" },
+    { id: "wiki", label: "Wiki app", sub: "SP" },
+  ]}
+  steps={ssoSteps}
+/>
+
+| | SAML | OIDC |
+| --- | --- | --- |
+| Format | XML assertion | JSON / JWT (ID token) |
+| Age | 2005, enterprise | 2014, modern |
+| Typical use | Corporate SSO (Okta, Entra ID, ADFS) | "Sign in with Google", mobile, SPAs |
+| Signed by | IdP's private key (XML signature) | IdP's private key (JWT signature) |
+
+<Callout type="trap">
+SSO is not a protocol; it's the experience of logging in once. **SAML** and **OIDC** are the protocols that implement it.
+</Callout>
+
+## API key authentication
+
+<Summary>
+A static secret key sent with every request. No login, no sessions, no JWTs. Used for machine-to-machine access.
+</Summary>
+
+The client sends `X-API-Key: sk_live_abc123xyz` (or `Authorization: Bearer …`), and the server looks the key up: `sk_live_abc123xyz → user 42, permissions: read`.
+
+```js
+async function apiKeyAuth(req, res, next) {
+  const key = req.headers['x-api-key']
+  if (!key) return res.status(401).json({ error: 'authentication failed' })
+
+  // store and look up a HASH of the key, never the raw key
+  const hash = crypto.createHash('sha256').update(key).digest('hex')
+  const { rows } = await pool.query('SELECT user_id FROM api_keys WHERE key_hash = $1 AND active = true', [hash])
+  if (!rows[0]) return res.status(401).json({ error: 'authentication failed' })
+
+  req.user = { id: rows[0].user_id }
+  next()
+}
+```
+
+| Use case | Best auth | Why |
+| --- | --- | --- |
+| Web app login | Session or JWT | User identity needed |
+| Mobile app | JWT | Stateless, portable |
+| Machine to machine | API key | No user involved |
+| Third-party access | OAuth 2.0 | Delegated permissions |
+| Sign in with Google | OIDC | Identity from the provider |
+
+## Service-to-service auth (mTLS)
+
+<Summary>
+In normal TLS, only the server proves who it is. In **mutual TLS**, both sides present certificates, so services authenticate each other without API keys.
+</Summary>
+
+export const tlsActors = [
+  { id: "orders", label: "orders", sub: "service" },
+  { id: "payments", label: "payments", sub: "service" },
+]
+
+<StepDiagram
+  title="Normal TLS vs mutual TLS between two services"
+  panels={[
+    {
+      title: "Normal TLS",
+      actors: tlsActors,
+      steps: [
+        { from: "orders", to: "payments", label: "ClientHello" },
+        { from: "payments", to: "orders", label: "cert: payments", dashed: true },
+        { from: "orders", to: "orders", label: "verify vs CA ✓" },
+        null,
+        null,
+        { from: "payments", to: "payments", label: "caller = ?", tone: "bad" },
+        { from: "orders", to: "payments", label: "POST /charge" },
+        { from: "payments", to: "orders", label: "needs API key", dashed: true, tone: "bad" },
+      ],
+    },
+    {
+      title: "Mutual TLS",
+      actors: tlsActors,
+      steps: [
+        { from: "orders", to: "payments", label: "ClientHello" },
+        { from: "payments", to: "orders", label: "cert: payments", dashed: true },
+        { from: "orders", to: "orders", label: "verify vs CA ✓" },
+        { from: "payments", to: "orders", label: "your cert?", dashed: true },
+        { from: "orders", to: "payments", label: "cert: orders" },
+        { from: "payments", to: "payments", label: "verify vs CA ✓" },
+        { from: "orders", to: "payments", label: "POST /charge" },
+        { from: "payments", to: "orders", label: "200 (orders)", dashed: true },
+      ],
+    },
+  ]}
+  captions={[
+    "The orders service opens a TLS connection to the payments service.",
+    "Payments presents its certificate.",
+    "Orders checks it against the internal CA it trusts: this really is payments.",
+    "Right: payments asks for the caller's certificate too.",
+    "Right: orders presents its own certificate and proves it holds the private key.",
+    "Left: the connection is encrypted, but payments has no idea who is calling. Right: payments verifies the orders certificate and knows exactly who the caller is.",
+    "The actual request is sent.",
+    "Left: payments still needs an API key or token to identify the caller. Right: the identity came from the certificate, so it authorizes “orders” directly.",
+  ]}
+  debug={[
+    [
+      `ClientHello: TLS 1.3, cipher suites, SNI = payments.internal`,
+      `ServerHello + Certificate
+  subject: CN=payments.internal
+  issuer:  CN=Internal CA`,
+      `verify chain: payments.internal ← Internal CA (trusted) ✓`,
+      null,
+      null,
+      `TLS up, traffic encrypted ✓
+but the server doesn't know which service is calling`,
+      `POST /charge HTTP/1.1
+Host: payments.internal
+
+{ "orderId": 456, "amount": 1000 }`,
+      `→ must check an API key / token to identify the caller`,
+    ],
+    [
+      `ClientHello: TLS 1.3, cipher suites, SNI = payments.internal`,
+      `ServerHello + Certificate
+  subject: CN=payments.internal
+  issuer:  CN=Internal CA`,
+      `verify chain: payments.internal ← Internal CA (trusted) ✓`,
+      `CertificateRequest   ("show me your certificate too")`,
+      `Certificate
+  subject: CN=orders.internal
+  issuer:  CN=Internal CA
+CertificateVerify: signed with orders' private key`,
+      `verify chain: orders.internal ← Internal CA ✓
+req.socket.getPeerCertificate().subject.CN === "orders.internal"`,
+      `POST /charge HTTP/1.1
+Host: payments.internal
+
+{ "orderId": 456, "amount": 1000 }`,
+      `HTTP/1.1 200 OK      (caller authenticated as CN=orders.internal)`,
+    ],
+  ]}
+/>
+
+```js
+const https = require('https')
+
+https.createServer({
+  key: fs.readFileSync('payments.key'),
+  cert: fs.readFileSync('payments.crt'),
+  ca: fs.readFileSync('internal-ca.crt'), // trust only our internal CA
+  requestCert: true, // ask the caller for a certificate
+  rejectUnauthorized: true, // no valid certificate → handshake fails
+}, app).listen(443)
+
+app.post('/charge', (req, res) => {
+  const caller = req.socket.getPeerCertificate().subject.CN // "orders.internal"
+  if (caller !== 'orders.internal') return res.status(403).end()
+  // ...charge
+})
+```
+
+In Kubernetes, a service mesh (Istio, Linkerd) does this automatically: it issues and rotates a certificate for every service, and adds mTLS to every call.
+
+## RBAC: role-based access control
+
+<Summary>
+Users get roles, and roles get permissions. The server checks the role on every request and returns 403 if it's not allowed.
+</Summary>
+
+<RbacSimulator />
+
+- **user** → read own notes
+- **moderator** → read and write any note
+- **admin** → read, write, delete, and access the dead zone
+
+```js
+// authentication: who are you? (jwt.verify throws on a bad token, so catch it -> 401)
+function authenticate(req, res, next) {
+  try {
+    const token = req.headers.authorization.split(' ')[1]
+    req.user = jwt.verify(token, process.env.JWT_SECRET)
+  } catch {
+    return res.status(401).json({ error: 'authentication failed' })
+  }
+  next()
+}
+
+// authorization: what can you do?
+function authorize(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) return res.status(403).json({ error: 'forbidden' })
+    next()
+  }
+}
+
+app.get('/admin/dead-zone', authenticate, authorize('admin'), getDeadZoneNotes)
+app.delete('/notes/:id', authenticate, authorize('admin', 'moderator'), deleteNote)
+app.get('/notes', authenticate, authorize('user', 'moderator', 'admin'), getNotes)
+```
+
+## Ownership checks (BOLA / IDOR)
+
+<Summary>
+A role check says what **kind** of action you can do. An ownership check says whether **this specific record** is yours. Missing it is Broken Object Level Authorization (BOLA, also called IDOR), the #1 API risk.
+</Summary>
+
+export const bolaRoleOnly = {
+  title: "Role check only",
+  actors: [
+    { id: "ali", label: "Ali" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Database" },
+  ],
+  steps: [
+    { from: "ali", to: "server", label: "GET /notes/8" },
+    { from: "server", to: "server", label: "role=user ✓" },
+    { from: "server", to: "db", label: "note 8?" },
+    { from: "db", to: "server", label: "owner: Sara", dashed: true },
+    { from: "server", to: "ali", label: "200 Sara's note", dashed: true, tone: "bad" },
+    null,
+  ],
+}
+
+export const bolaOwner = {
+  title: "Role + ownership",
+  actors: bolaRoleOnly.actors,
+  steps: [
+    { from: "ali", to: "server", label: "GET /notes/8" },
+    { from: "server", to: "server", label: "role=user ✓" },
+    { from: "server", to: "db", label: "note 8?" },
+    { from: "db", to: "server", label: "owner: Sara", dashed: true },
+    { from: "server", to: "server", label: "owner ≠ Ali ✗", tone: "bad" },
+    { from: "server", to: "ali", label: "404", dashed: true },
+  ],
+}
+
+<StepDiagram
+  title="Ali changes /notes/7 to /notes/8"
+  panels={[bolaRoleOnly, bolaOwner]}
+  captions={[
+    "Ali's own note is 7. He edits the URL to 8, which is Sara's note.",
+    "Both: Ali is a user, and users can read notes, so the role check passes.",
+    "The server loads note 8.",
+    "The database says note 8 belongs to Sara.",
+    "Left: the server returns Sara's private note. Right: the server compares the owner with Ali and refuses.",
+    "Right: 404, which doesn't even reveal that note 8 exists.",
+  ]}
+  debug={[
+    [
+      `GET /notes/8 HTTP/1.1
+Authorization: Bearer eyJ…  (sub: "42", role: "user")`,
+      `authorize("user", "moderator", "admin")  → ok`,
+      `SELECT * FROM notes WHERE id = 8;`,
+      `{ id: 8, owner_id: 77, title: "Sara's diary" }`,
+      `HTTP/1.1 200 OK
+
+{ "id": 8, "title": "Sara's diary", … }     ← data leak`,
+      null,
+    ],
+    [
+      `GET /notes/8 HTTP/1.1
+Authorization: Bearer eyJ…  (sub: "42", role: "user")`,
+      `authorize("user", "moderator", "admin")  → ok`,
+      `SELECT * FROM notes WHERE id = 8;`,
+      `{ id: 8, owner_id: 77, title: "Sara's diary" }`,
+      `note.owner_id (77) !== req.user.sub (42)  → deny`,
+      `HTTP/1.1 404 Not Found
+
+{ "error": "not found" }`,
+    ],
+  ]}
+/>
+
+```js
+app.get('/notes/:noteId', authenticate, authorize('user', 'moderator', 'admin'), async (req, res) => {
+  const canReadAny = ['moderator', 'admin'].includes(req.user.role)
+  const { rows } = canReadAny
+    ? await pool.query('SELECT * FROM notes WHERE id = $1', [req.params.noteId])
+    : await pool.query('SELECT * FROM notes WHERE id = $1 AND owner_id = $2', [req.params.noteId, req.user.sub])
+  if (!rows[0]) return res.status(404).json({ error: 'not found' })
+  res.json(rows[0])
+})
+```
+
+<Callout type="trap">
+Never trust an ID just because it came from a logged-in user. Take the user's identity from the token (`req.user.sub`), not from the request body or URL, and scope every query by it.
+</Callout>
+
+## Generic errors and timing attacks
+
+<Summary>
+Every login failure must look the same: same message, and roughly the same time.
+</Summary>
+
+export const noUser = {
+  title: "Email doesn't exist",
+  actors: [
+    { id: "attacker", label: "Attacker" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Database" },
+  ],
+  steps: [
+    { from: "attacker", to: "server", label: "POST /login" },
+    { from: "server", to: "db", label: "find user" },
+    { from: "db", to: "server", label: "not found", dashed: true },
+    { from: "server", to: "attacker", label: "401 · ~5ms", dashed: true, tone: "bad" },
+    null,
+    { from: "attacker", to: "attacker", label: "fast = no email", tone: "bad" },
+  ],
+}
+
+export const wrongPass = {
+  title: "Email exists, wrong password",
+  actors: [
+    { id: "attacker", label: "Attacker" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Database" },
+  ],
+  steps: [
+    { from: "attacker", to: "server", label: "POST /login" },
+    { from: "server", to: "db", label: "find user" },
+    { from: "db", to: "server", label: "user row", dashed: true },
+    { from: "server", to: "server", label: "argon2 (slow)" },
+    { from: "server", to: "attacker", label: "401 · ~200ms", dashed: true, tone: "bad" },
+    { from: "attacker", to: "attacker", label: "slow = exists!", tone: "bad" },
+  ],
+}
+
+export const noUserFixed = {
+  title: "Email doesn't exist",
+  actors: noUser.actors,
+  steps: [
+    { from: "attacker", to: "server", label: "POST /login" },
+    { from: "server", to: "db", label: "find user" },
+    { from: "db", to: "server", label: "not found", dashed: true },
+    { from: "server", to: "server", label: "argon2 (dummy)" },
+    { from: "server", to: "attacker", label: "401 · ~200ms", dashed: true },
+    { from: "attacker", to: "attacker", label: "same speed?" },
+  ],
+}
+
+export const wrongPassFixed = {
+  ...wrongPass,
+  steps: [...wrongPass.steps.slice(0, 5), { from: "attacker", to: "attacker", label: "can't tell" }],
+}
+
+export const R401 = `HTTP/1.1 401 Unauthorized
+
+{ "error": "authentication failed" }`
+
+export const timingDebug = [
+  [
+    `POST /login HTTP/1.1
+
+{ "email": "nobody@x.com", "password": "guess1" }`,
+    `SELECT * FROM users WHERE email = 'nobody@x.com';`,
+    `(0 rows)`,
+    R401 + `
+
+// response time: 5 ms`,
+    null,
+    `5 ms  → "this email doesn't exist"`,
+  ],
+  [
+    `POST /login HTTP/1.1
+
+{ "email": "ali@notes.app", "password": "guess1" }`,
+    `SELECT * FROM users WHERE email = 'ali@notes.app';`,
+    `(1 row)`,
+    `argon2.verify(user.password, "guess1")  → false   (~195 ms)`,
+    R401 + `
+
+// response time: 200 ms`,
+    `200 ms  → "this email exists!"`,
+  ],
+]
+
+export const timingDebugFixed = [
+  [
+    timingDebug[0][0],
+    timingDebug[0][1],
+    timingDebug[0][2],
+    `argon2.verify(DUMMY_HASH, "guess1")  → false   (~195 ms)
+// DUMMY_HASH = real argon2 hash made once at startup`,
+    R401 + `
+
+// response time: 200 ms`,
+    `200 ms vs 200 ms  → no signal`,
+  ],
+  [
+    ...timingDebug[1].slice(0, 5),
+    `200 ms vs 200 ms  → no signal`,
+  ],
+]
+
+<StepDiagram
+  title="The timing attack"
+  scenarios={[
+    {
+      label: "Without fix",
+      panels: [noUser, wrongPass],
+      debug: timingDebug,
+      captions: [
+        "The attacker tries a login on both sides.",
+        "The server looks up the email.",
+        "Left: no such user. Right: the user exists.",
+        "Left: it returns 401 immediately (~5 ms). Right: it runs the slow Argon2 hash first.",
+        "Right: 401 after ~200 ms. Both messages are identical, but the timing differs.",
+        "The attacker learns which emails exist from the timing alone.",
+      ],
+    },
+    {
+      label: "With fix",
+      panels: [noUserFixed, wrongPassFixed],
+      debug: timingDebugFixed,
+      captions: [
+        "Same two logins, now with the fix.",
+        "The server looks up the email.",
+        "Left: no such user. Right: the user exists.",
+        "Left: the server still runs argon2.verify, against a real precomputed dummy hash. Right: it verifies the real hash.",
+        "Both return the same 401 after ~200 ms.",
+        "Same message, same timing: the attacker learns nothing.",
+      ],
+    },
+  ]}
+/>
+
+**Generic errors.** Messages like "user not found," "incorrect password" or "account locked" tell attackers which emails exist. Always return `401 { error: 'authentication failed' }`.
+
+**Timing attacks.** If the email doesn't exist, login fails fast (~5 ms). If the email exists but the password is wrong, hashing makes it slow (~200 ms). The attacker measures the difference.
+
+
+```js
+// FIX 1: always hash. The dummy must be a REAL argon2 hash, computed once at startup.
+// (A fake string can make argon2.verify throw or return early, and the timing gap comes back.)
+const dummyHashPromise = argon2.hash('dummy-password')
+
+const hash = user ? user.password : await dummyHashPromise
+const valid = await argon2.verify(hash, password)
+if (!user || !valid) return res.status(401).json({ error: 'authentication failed' })
+
+// FIX 2: constant-time comparison for secret strings (hash first so lengths always match)
+const a = crypto.createHash('sha256').update(expected).digest()
+const b = crypto.createHash('sha256').update(received).digest()
+const match = crypto.timingSafeEqual(a, b)
+```
+
+## Password reset
+
+<Summary>
+Same response whether the email exists or not. A random, single-use, short-lived token, stored **hashed**. After the reset, kill all old sessions.
+</Summary>
+
+export const resetSteps = [
+  { from: "user", to: "server", label: "POST /forgot", caption: "Ali forgot his password and submits his email." },
+  { from: "server", to: "db", label: "store token hash", state: { db: "reset:hash → 42\nexpires in 15m" }, caption: "The server creates a random token and stores only its SHA-256 hash, with a 15-minute expiry." },
+  { from: "server", to: "email", label: "send link", caption: "The raw token goes only into the email link." },
+  { from: "server", to: "user", label: "200 same message", dashed: true, caption: "The response is identical whether or not the email exists, so it can't be used to discover accounts." },
+  { from: "email", to: "user", label: "link ?token=…", dashed: true, caption: "Ali opens the email and clicks the link." },
+  { from: "user", to: "server", label: "POST /reset", caption: "Ali submits the token and a new password." },
+  { from: "server", to: "db", label: "find token hash", caption: "The server hashes the submitted token and looks it up." },
+  { from: "db", to: "server", label: "userId 42", dashed: true, caption: "Found and not expired: it belongs to user 42." },
+  { from: "server", to: "server", label: "argon2(new pw)", caption: "The new password is hashed with Argon2 and saved." },
+  { from: "server", to: "db", label: "del token + sessions", state: { db: "(token gone)\nsessions revoked" }, caption: "The token is deleted (single use), and all of Ali's sessions and refresh tokens are revoked. If an attacker was logged in, they're out." },
+  { from: "server", to: "user", label: "200 log in again", dashed: true, caption: "Ali logs in with the new password." },
+]
+
+export const resetDebug = [
+  `POST /forgot HTTP/1.1
+
+{ "email": "ali@notes.app" }`,
+  `token = "q8Zr1mN…"  (32 random bytes)
+redis> SET reset:3f9a…(sha256) 42 EX 900
+OK`,
+  `To: ali@notes.app
+Subject: Reset your password
+https://notes.app/reset?token=q8Zr1mN…`,
+  `HTTP/1.1 200 OK
+
+{ "message": "If an account exists, we sent a reset link." }`,
+  `GET /reset?token=q8Zr1mN… HTTP/1.1
+Host: notes.app`,
+  `POST /reset HTTP/1.1
+
+{ "token": "q8Zr1mN…", "password": "••••••••" }`,
+  `redis> GET reset:3f9a…(sha256 of the submitted token)`,
+  `"42"`,
+  `argon2.hash(newPassword)  → "$argon2id$v=19$m=65536,t=3,p=4$…"
+UPDATE users SET password = $1 WHERE id = 42;`,
+  `redis> DEL reset:3f9a…
+redis> SET revoked:<every family of user 42> 1
+// every session and refresh token for Ali is now dead`,
+  `HTTP/1.1 200 OK
+
+{ "message": "Password updated. Please log in." }`,
+]
+
+<StepDiagram
+  title="Password reset flow"
+  debug={resetDebug}
+  actors={[
+    { id: "user", label: "Ali" },
+    { id: "server", label: "Server" },
+    { id: "db", label: "Redis / DB" },
+    { id: "email", label: "Email" },
+  ]}
+  steps={resetSteps}
+/>
+
+```js
+app.post('/forgot', async (req, res) => {
+  const user = await findUserByEmail(req.body.email)
+  if (user) {
+    const token = crypto.randomBytes(32).toString('base64url')
+    await redis.set(`reset:${sha256(token)}`, user.id, 'EX', 900) // 15 min, stored hashed
+    queue.add('send-reset-email', { to: user.email, token }) // in the background: no timing difference
+  }
+  res.json({ message: 'If an account exists, we sent a reset link.' }) // always the same
+})
+
+app.post('/reset', async (req, res) => {
+  const key = `reset:${sha256(req.body.token)}`
+  const userId = await redis.get(key)
+  if (!userId) return res.status(400).json({ error: 'invalid or expired link' })
+
+  await redis.del(key) // single use
+  await pool.query('UPDATE users SET password = $1 WHERE id = $2', [await argon2.hash(req.body.password), userId])
+  await revokeAllSessions(userId) // log out everywhere
+  res.json({ message: 'Password updated. Please log in.' })
+})
+```
+
+<Callout type="trap">
+Sending the email *inside* the request makes "email exists" responses slower, which is a timing leak. Put the email on a background queue so both paths return equally fast.
+</Callout>
+
+## Quiz
+
+Think of the answer first, then reveal it.
+
+export const quiz = [
+  {
+    kind: "concept",
+    q: "What is the difference between authentication and authorization?",
+    a: "Authentication proves **who you are**. Authorization decides **what you're allowed to do**. Authentication always happens first. A failed authentication returns 401; authenticated but not allowed returns 403.",
+  },
+  {
+    kind: "concept",
+    q: "Why never store plain-text passwords, and why Argon2 instead of SHA-256?",
+    a: "If the database is breached, plain-text passwords expose every user immediately.\n\nSHA-256 is fast, so attackers can try billions of guesses per second. Argon2 is deliberately slow and memory-hard, which makes brute force very expensive.",
+  },
+  {
+    kind: "concept",
+    q: "What makes a JWT stateless, and is its payload encrypted?",
+    a: "The token carries everything the server needs (user ID, role, expiration), and the server verifies the signature locally, with no database or Redis lookup.\n\nThe payload is **base64url-encoded, not encrypted**. Anyone can read it, so never put sensitive data in it.",
+  },
+  {
+    kind: "concept",
+    q: "How do you revoke a JWT immediately? What is the hybrid approach?",
+    a: "A pure JWT can't be revoked before it expires. Options: a very short expiry, a blocklist in Redis, or the hybrid.\n\nHybrid: a short access JWT (15 min) for fast requests with no lookup, plus a long refresh token (30 days) in Redis for control and revocation.",
+  },
+  {
+    kind: "concept",
+    q: "What is the difference between a session and a cookie? What does HttpOnly do?",
+    a: "A session is the authentication mechanism (state on the server). A cookie is the transport (the browser stores it and sends it automatically). A cookie can carry a session ID or a JWT.\n\n`HttpOnly` stops JavaScript from reading the cookie, which protects against XSS stealing it.",
+  },
+  {
+    kind: "concept",
+    q: "What is the difference between OAuth 2.0 and OIDC? What does Google send back in the redirect?",
+    a: "OAuth 2.0 is authorization: what an app can access. OIDC adds authentication, an **ID token** (a JWT) with the user's identity.\n\nThe redirect carries **only the authorization code**. The ID token and access token come back when the server exchanges the code at Google's token endpoint.",
+  },
+  {
+    kind: "concept",
+    q: "What is refresh token rotation, and how is reuse detected?",
+    a: "Each time a refresh token is used, a new one is issued. Used tokens are marked **used** (not deleted), and all tokens from one login share a **family**. If a used token shows up again, it was stolen, so the server revokes the whole family and the attacker loses access.",
+  },
+  {
+    kind: "concept",
+    q: "What is RBAC? What happens if `authenticate` calls `jwt.verify` without try/catch?",
+    a: "Users get roles, and roles get permissions. On every request, the server checks the role and returns 403 if it's not allowed.\n\n`jwt.verify` **throws** on an invalid token. Without try/catch, the app returns **500** instead of **401**.",
+  },
+  {
+    kind: "concept",
+    q: "What is a timing attack on login, and how do you prevent it?",
+    a: "A missing user fails fast, while an existing user with a wrong password is slow (because of hashing). The attacker measures the difference to find valid emails.\n\nFix: always run `argon2.verify`, against a **real precomputed Argon2 dummy hash** when the user isn't found, and always return the same generic error.",
+  },
+  {
+    kind: "scenario",
+    q: "A user logs out but their JWT is still valid for 10 minutes. Is this a problem?",
+    a: "It's an acceptable trade-off for most apps, because the short expiry limits the risk. For sensitive apps like banking, use a blocklist or a 1–2 minute expiry. The hybrid approach with refresh-token revocation is the standard answer.",
+  },
+  {
+    kind: "scenario",
+    q: "Your app runs on five servers in three regions and uses microservices. Sessions or JWT? HS256 or RS256?",
+    a: "**JWT.** Sessions would need Redis replicated across regions, which adds latency and complexity. Use the hybrid approach for revocation.\n\n**RS256/ES256.** With HS256, every service holds the signing secret, so one compromised service can create tokens. With RS256, only the auth service signs, and the others verify with the public key.",
+  },
+  {
+    kind: "scenario",
+    q: "Your login endpoint is being brute-forced, and a user reports someone else is using their account. What do you do?",
+    a: "Brute force: rate-limit per IP and per email, lock the account after N failures, use generic error messages, add a CAPTCHA for suspicious traffic, and log and alert.\n\nCompromised account: delete all the user's refresh tokens from Redis, force a password reset, and for immediate revocation, add the user to a blocklist. Existing JWTs expire within 15 minutes.",
+  },
+  {
+    kind: "concept",
+    q: "What is CSRF, and how does a CSRF token stop it?",
+    a: "The browser attaches cookies to every request to a site, even one triggered by evil.com, so a hidden form can act as the logged-in user. The server gives its own frontend a random per-session token that must come back in a header. evil.com can't read notes.app's pages, so it can't learn the token, and the forged request gets 403. It only matters for cookie auth.",
+  },
+  {
+    kind: "scenario",
+    q: "A malicious app on the phone intercepts the authorization code in your mobile login. How does PKCE save you?",
+    a: "Before redirecting, the app made a secret `code_verifier` and sent only its SHA-256 hash (`code_challenge`). At the token exchange, Google requires the original verifier. The attacker has the code but not the verifier, so Google answers `400 invalid_grant`.",
+  },
+  {
+    kind: "scenario",
+    q: "Ali changes `/notes/7` to `/notes/8` and sees Sara's note, even though your RBAC check passed. What's the bug and the fix?",
+    a: "Broken Object Level Authorization (BOLA/IDOR): the role check says users may read notes, but nothing checks that **this** note belongs to Ali. Scope the query by owner (`WHERE id = $1 AND owner_id = $2`, with the owner from `req.user.sub`) and return 404 when it's not found.",
+  },
+]
+
+<Quiz id="auth" questions={quiz} />

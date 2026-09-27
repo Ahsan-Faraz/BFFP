@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Backend from First Principles — study site
 
-## Getting Started
-
-First, run the development server:
+A static study site built from my backend notes (Next.js 16 App Router, TypeScript, Tailwind, MDX).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev     # http://localhost:3000
+npm run build   # every page is prerendered static HTML
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Editing notes
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Each topic is one file in `content/` (`auth.mdx`, and later `http.mdx`, `routing.mdx`, `serialization.mdx`).
+To fix a note, edit only that file. Sidebar sections and search come from its `## ` headings automatically.
+A topic appears in the sidebar as soon as its MDX file exists (the order is set in `lib/topics.ts`).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+These components work in any MDX file without importing them:
 
-## Learn More
+| Component | Use |
+| --- | --- |
+| `<Summary>` | The one line to remember, at the top of each section |
+| `<Callout type="trap">` | Interview trap box |
+| fenced code blocks | Highlighted at build time (shiki) |
+| `<StepDiagram actors steps />` or `<StepDiagram panels captions />` | Step-through SVG sequence diagram |
+| `<StepDiagram scenarios={[{ label, ... }]} />` | Same, with a toggle between alternative flows |
+| `<JwtDecoder />` / `<JwtTamper />` | Decode a JWT; try editing one and watch the signature check fail |
+| `<RbacSimulator />` | Send a request through authenticate → authorize → handler |
+| `<CookiePlayground />` | Toggle SameSite / Secure / HttpOnly and see which requests carry the cookie |
+| `<IdempotencySimulator />` | Retry PUT / POST / PATCH and watch the server state |
+| `<RouteMatcher />` | Watch Express match a URL top to bottom and fill req.params / req.query |
+| `<JsonPlayground />` | Run text through JSON.parse and see valid / invalid |
 
-To learn more about Next.js, take a look at the following resources:
+Diagrams take an optional `debug` prop: one string per step (or one array per panel) with the real request, response, command or log line for that step.
+| `<Quiz id questions />` | Quiz with flashcard mode; revealed answers saved in localStorage |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deploying
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Push to GitHub and import the repo in Vercel, with **Root Directory** set to `backend-notes`. No environment variables are needed.
 
-## Deploy on Vercel
+## Dependencies beyond create-next-app
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `@next/mdx`, `@mdx-js/loader`, `@mdx-js/react`, `@types/mdx`: the official Next.js MDX setup.
+- `remark-gfm`: GitHub-style tables and strikethrough in MDX (the comparison tables need it).
+- `shiki`: build-time syntax highlighting, so the browser gets no highlighter JavaScript.
