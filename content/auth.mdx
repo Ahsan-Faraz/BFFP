@@ -1,7 +1,7 @@
 ## Authentication vs Authorization
 
 <Summary>
-Authentication = **who** are you? Authorization = **what** are you allowed to do?
+Authentication checks **who you are** (email + password). Authorization checks **what you are allowed to do** (your role). Authentication always comes first. Not logged in → **401**. Logged in but not allowed → **403**.
 </Summary>
 
 export const authzUser = {
@@ -87,16 +87,19 @@ Content-Type: application/json
   ]}
 />
 
-Ali logs in, and the server confirms "this is Ali." That's authentication. Then Ali tries to delete a user, and the server checks his role. That's authorization.
+Two separate checks happen on the request:
+
+1. **Who is this?** The server checks the password or token → "this is Ali".
+2. **Can Ali do this?** The server looks at Ali's role → `user` can't delete users, `admin` can.
 
 <Callout type="trap">
-Authentication always happens **before** authorization. You can't check what someone is allowed to do until you know who they are. Failed authentication → **401**. Authenticated but not allowed → **403**.
+401 is named "Unauthorized", but it really means **not logged in**. 403 means **logged in, but not allowed**.
 </Callout>
 
 ## The password problem
 
 <Summary>
-Before OAuth, a travel app that needed your Gmail contacts asked for your Gmail password.
+Before OAuth, if a travel app needed your Gmail contacts, it asked for your Gmail **password**. That gave it full access to everything, and the only way to take it back was to change your password. OAuth fixed this with tokens that have limited permissions.
 </Summary>
 
 export const noOauth = {
@@ -180,22 +183,80 @@ Authorization: Bearer ya29.a0Af…`,
   ]}
 />
 
-- Your password gives access to **everything**.
-- You can't revoke access without changing your password, which breaks every other app.
-- One breach exposes every site where you reused that password.
-- Password fatigue: too many credentials.
+Why handing over your password was a disaster:
 
-How the ideas evolved: passwords → MFA → OAuth (tokens with specific permissions) → JWT (authentication carried in the token) → Zero Trust (verify everything) → passkeys (passwordless, cryptographic proof).
+- The app can read, send and delete **all** your email.
+- To take access back, you change your password, and every other app breaks.
+- Same password on other sites? One leak exposes all of them.
+
+How auth evolved: Passwords → MFA → OAuth → JWT → Zero Trust → Passkeys.
 
 ## Password hashing
 
 <Summary>
-Never store plain-text passwords. Store an Argon2 hash.
+I never store the password itself. I store an **Argon2 hash** of it. At login, I verify what the user typed against that hash. Argon2 is slow on purpose, so if the database leaks, attackers can't guess passwords fast, the way they can with MD5 or SHA-256.
 </Summary>
 
-If the database is breached, plain-text passwords expose every user. A hash only gives the attacker a string they have to crack.
+export const hashActors = [
+  { id: "server", label: "Server" },
+  { id: "db", label: "Database" },
+  { id: "attacker", label: "Attacker" },
+]
 
-MD5 and SHA-256 are **fast**, so attackers can try billions of guesses per second. Argon2 is deliberately **slow and memory-hard**, which makes every guess expensive. It also adds a random salt to each password, so identical passwords produce different hashes.
+<StepDiagram
+  title="What a database leak exposes"
+  panels={[
+    {
+      title: "Plain text",
+      actors: hashActors,
+      steps: [
+        { from: "server", to: "server", label: "got password" },
+        { from: "server", to: "db", label: "INSERT as-is", state: { db: "mypassword123" } },
+        { from: "attacker", to: "db", label: "DB leaked", tone: "bad" },
+        { from: "db", to: "attacker", label: "mypassword123", dashed: true, tone: "bad", state: { attacker: "Ali's password" } },
+        { from: "attacker", to: "attacker", label: "logs in as Ali", tone: "bad" },
+      ],
+    },
+    {
+      title: "Argon2 hash",
+      actors: hashActors,
+      steps: [
+        { from: "server", to: "server", label: "argon2.hash()" },
+        { from: "server", to: "db", label: "INSERT hash", state: { db: "$argon2id$v=19\n$m=65536…" } },
+        { from: "attacker", to: "db", label: "DB leaked", tone: "bad" },
+        { from: "db", to: "attacker", label: "$argon2id$…", dashed: true, state: { attacker: "only a hash" } },
+        { from: "attacker", to: "attacker", label: "guessing: slow" },
+      ],
+    },
+  ]}
+  captions={[
+    "Ali registers with the password mypassword123. Left: the server keeps it as it is. Right: the server runs it through argon2.hash() first.",
+    "Left: the real password is saved in the database. Right: only the hash is saved (the random salt and settings are inside that string).",
+    "One day the database leaks.",
+    "Left: the attacker reads Ali's real password. Right: the attacker only gets the hash, and a hash can't be turned back into the password.",
+    "Left: the attacker logs in as Ali, and tries the same password on his Gmail and bank. Right: the attacker has to guess passwords one by one, and Argon2 makes every guess slow.",
+  ]}
+  debug={[
+    [
+      `POST /register HTTP/1.1\n\n{ "email": "ali@notes.app", "password": "mypassword123" }`,
+      `INSERT INTO users (email, password)\nVALUES ('ali@notes.app', 'mypassword123');`,
+      `$ pg_dump notes > leak.sql      (attacker has a copy)`,
+      `SELECT email, password FROM users;\n ali@notes.app | mypassword123`,
+      `POST /login\n{ "email": "ali@notes.app", "password": "mypassword123" }\n→ 200 OK`,
+    ],
+    [
+      `POST /register HTTP/1.1\n\n{ "email": "ali@notes.app", "password": "mypassword123" }\n\nargon2.hash("mypassword123")`,
+      `INSERT INTO users (email, password) VALUES ('ali@notes.app',\n '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub…');\n       ↑algorithm  ↑64 MB memory, 3 passes  ↑salt  ↑hash`,
+      `$ pg_dump notes > leak.sql      (attacker has a copy)`,
+      `SELECT email, password FROM users;\n ali@notes.app | $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$Rdes…`,
+      `SHA-256 on a GPU:  billions of guesses per second\nArgon2:            every guess needs 64 MB of RAM\n                   → only a handful of guesses per second`,
+    ],
+  ]}
+/>
+
+**Why not MD5 or SHA-256?** They are built to be fast, so a GPU can try billions of guesses per second. Argon2 is built to be slow and to need a lot of memory for **every** guess.
+
+**Salt:** Argon2 mixes a random value into each password before hashing, so two users with the same password get different hashes.
 
 ```js
 const argon2 = require('argon2')
@@ -212,8 +273,37 @@ if (!valid) throw new AuthError('authentication failed')
 ## MFA: multi-factor authentication
 
 <Summary>
-MFA requires more than one **type** of proof.
+MFA means proving who you are with **two different types** of proof: something you know (password), something you have (phone), or something you are (fingerprint). If someone steals the password, they still can't log in without the second one.
 </Summary>
+
+export const mfaSteps = [
+  { from: "ali", to: "server", label: "email + password", caption: "Ali types his email and password." },
+  { from: "server", to: "server", label: "password ✓", caption: "The password is correct, but Ali has MFA turned on, so he isn't logged in yet." },
+  { from: "server", to: "ali", label: "enter 6-digit code", dashed: true, caption: "The server asks for the code from his phone." },
+  { from: "phone", to: "phone", label: "HMAC(secret, time)", state: { phone: "492817" }, caption: "The authenticator app makes a code from two things: a secret it got at setup (the QR code) and the current time. The code changes every 30 seconds." },
+  { from: "ali", to: "server", label: "492817", caption: "Ali types the code." },
+  { from: "server", to: "server", label: "same math → match ✓", caption: "The server has the same secret and the same clock, so it computes the same code. They match. The phone and server never talked." },
+  { from: "server", to: "ali", label: "logged in", dashed: true, caption: "Now Ali is logged in. A thief with only the password would be stuck at step 3." },
+]
+
+<StepDiagram
+  title="Login with password + authenticator code"
+  debug={[
+    `POST /login HTTP/1.1\n\n{ "email": "ali@notes.app", "password": "••••••" }`,
+    `argon2.verify(user.password, password)  → true\nuser.mfa_enabled → true   → don't create a session yet`,
+    `HTTP/1.1 200 OK\n\n{ "mfaRequired": true }`,
+    `Authenticator app:\ncode = HMAC-SHA1(sharedSecret, floor(now / 30))  → 492817`,
+    `POST /login/mfa HTTP/1.1\n\n{ "code": "492817" }`,
+    `server: HMAC-SHA1(sharedSecret, floor(now / 30))  → 492817\n"492817" === "492817"  ✓`,
+    `HTTP/1.1 200 OK\nSet-Cookie: sessionId=abc123; HttpOnly; Secure`,
+  ]}
+  actors={[
+    { id: "phone", label: "Phone", sub: "authenticator app" },
+    { id: "ali", label: "Ali" },
+    { id: "server", label: "Server" },
+  ]}
+  steps={mfaSteps}
+/>
 
 | Factor | Type | Example |
 | --- | --- | --- |
@@ -221,12 +311,10 @@ MFA requires more than one **type** of proof.
 | Something you have | Possession | Phone, authenticator app |
 | Something you are | Inherence | Fingerprint, Face ID |
 
-Password ✓ + code from your phone ✓ → login granted.
-
 ## Passkeys (WebAuthn)
 
 <Summary>
-A passkey is a key pair made on your device. The server stores only the **public key**. To log in, the device signs a random challenge. There's no password to steal or phish.
+A passkey is a key pair on your device. The server keeps only the **public key**. At login the server sends a random challenge, the device signs it after Face ID, and the server checks the signature with the public key. No password is ever sent, so there's nothing to phish or leak.
 </Summary>
 
 export const passkeySteps = [
@@ -295,9 +383,9 @@ Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax`,
   steps={passkeySteps}
 />
 
-- **Phishing-resistant:** the browser only lets the passkey sign for the site it was created for (`notes.app`), so a fake `n0tes.app` gets nothing.
-- **Nothing to leak:** the server holds public keys only.
-- **Two factors in one:** something you have (the device) + something you are or know (Face ID, PIN). The biometric never leaves the device.
+- The **private key never leaves** your phone or laptop.
+- The server stores only the public key, which is useless to an attacker.
+- The passkey only works on the real site (`notes.app`), so a fake site gets nothing.
 
 <Callout type="trap">
 "Does the server receive my fingerprint?" No. The biometric only unlocks the private key on the device. The server only ever sees a signature.
@@ -306,40 +394,41 @@ Set-Cookie: sessionId=abc123; HttpOnly; Secure; SameSite=Lax`,
 ## HTTP is stateless
 
 <Summary>
-HTTP doesn't remember you. Every request needs to carry proof of identity.
+HTTP doesn't remember anything between requests; every request arrives like a stranger. So after login, the client must send proof on **every** request: either a **session ID** (the server remembers the user) or a **JWT** (the token itself says who the user is).
 </Summary>
 
-Request 1, 2 and 3 each arrive with the server asking "who is this?" After login, something has to carry the proof. There are two solutions:
+<StepDiagram
+  title="The server forgets you right after login"
+  actors={[
+    { id: "browser", label: "Browser" },
+    { id: "server", label: "Server" },
+  ]}
+  steps={[
+    { from: "browser", to: "server", label: "POST /login ✓", caption: "Ali logs in. Email and password are correct." },
+    { from: "server", to: "browser", label: "200 logged in", dashed: true, caption: "The server says OK, but sends nothing back that proves it later." },
+    { from: "browser", to: "server", label: "GET /profile", caption: "Next request: GET /profile, with no proof attached." },
+    { from: "server", to: "server", label: "who is this? ✗", tone: "bad", caption: "The server has no memory of the login one second ago. Every HTTP request is separate." },
+    { from: "server", to: "browser", label: "401", dashed: true, tone: "bad", caption: "401. So after login, the browser must send proof with every request: a session ID or a JWT." },
+  ]}
+  debug={[
+    `POST /login HTTP/1.1\n\n{ "email": "ali@notes.app", "password": "••••••" }`,
+    `HTTP/1.1 200 OK\n\n{ "message": "logged in" }\n// no Set-Cookie, no token`,
+    `GET /profile HTTP/1.1\nHost: notes.app\n(no Cookie header, no Authorization header)`,
+    `new request → no memory of earlier requests\nreq.headers.cookie        → undefined\nreq.headers.authorization → undefined`,
+    `HTTP/1.1 401 Unauthorized\n\n{ "error": "not authenticated" }`,
+  ]}
+/>
 
-- **Session (stateful):** the server remembers you.
-- **JWT (stateless):** the token carries the proof.
+Two ways to carry that proof:
+
+- **Session (stateful):** the server saves you in Redis; the browser keeps only an ID.
+- **JWT (stateless):** the token itself carries who you are.
 
 ## Session-based authentication
 
 <Summary>
-The server stores the session in Redis. The browser holds only the session ID, in a cookie.
+At login the server creates a random session ID, saves `sessionId → userId` in **Redis**, and sends the ID to the browser in a cookie. On every request the browser sends the cookie back and the server looks it up in Redis. Logout = delete the key, so access is gone instantly.
 </Summary>
-
-1. The user logs in with email + password, and the server verifies them.
-2. The server creates a session ID `abc123` and stores `abc123 → { userId: 42 }` in Redis.
-3. The session ID goes to the browser in a cookie.
-4. On the next request, the browser sends the cookie automatically. The server looks up Redis and knows it's user 42.
-
-```js
-// LOGIN (after verifying the password)
-const sessionId = crypto.randomUUID()
-await redis.setex(`session:${sessionId}`, 1800, JSON.stringify({ userId: user.id, role: user.role }))
-res.cookie('sessionId', sessionId, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 1800000 })
-
-// PROTECTED ROUTE
-const data = await redis.get(`session:${req.cookies.sessionId}`)
-if (!data) return res.status(401).json({ error: 'authentication failed' })
-
-// LOGOUT: instant revocation
-await redis.del(`session:${req.cookies.sessionId}`)
-```
-
-**Stateful in distributed systems.** If the session is stored in one server's memory, a request that lands on another server fails. The fix is a **shared Redis** that every server reads from.
 
 export const memPanel = {
   title: "Session in server memory",
@@ -429,29 +518,51 @@ Cookie: sessionId=abc123`,
   ]}
 />
 
+1. Login → server makes a random ID `abc123`.
+2. Redis stores `abc123 → { userId: 42 }`.
+3. Browser gets cookie `sessionId=abc123`.
+4. Every request sends the cookie → Redis lookup → "user 42".
+
+The diagram above shows why Redis must be **shared** when you run more than one server.
+
+```js
+// LOGIN (after verifying the password)
+const sessionId = crypto.randomUUID()
+await redis.setex(`session:${sessionId}`, 1800, JSON.stringify({ userId: user.id, role: user.role }))
+res.cookie('sessionId', sessionId, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 1800000 })
+
+// PROTECTED ROUTE
+const data = await redis.get(`session:${req.cookies.sessionId}`)
+if (!data) return res.status(401).json({ error: 'authentication failed' })
+
+// LOGOUT: instant revocation
+await redis.del(`session:${req.cookies.sessionId}`)
+```
+
 ## JWT: JSON Web Tokens
 
 <Summary>
-The client carries a signed token with the claims inside. The server verifies the signature locally, with no lookup.
+A JWT is a signed token with three parts: header, payload, signature. The payload holds the user ID, role and expiry. The server checks the signature with its secret, with **no database lookup**, which is why it's called stateless. The payload is only encoded, not encrypted, so anyone can read it: never put secrets in it.
 </Summary>
-
-A JWT is `HEADER.PAYLOAD.SIGNATURE`, with each part base64url-encoded:
-
-- **Header:** `{ "alg": "HS256", "typ": "JWT" }`
-- **Payload:** `{ "sub": "42", "role": "user", "exp": 1799999999, "iat": 1700000000 }`
-- **Signature:** `HMACSHA256(base64url(header) + "." + base64url(payload), SECRET_KEY)`
-
-Paste a JWT below. The payload decodes without any key:
 
 <JwtDecoder />
 
-The payload is readable, but it can't be changed without the secret:
-
 <JwtTamper />
 
-<Callout type="trap">
-The JWT payload is **encoded, not encrypted**. Anyone can decode it. Never put passwords or secrets in it: only the user ID, role and expiration.
-</Callout>
+`HEADER.PAYLOAD.SIGNATURE`
+
+- **Header:** which algorithm signed it, e.g. `HS256`.
+- **Payload:** `sub` (user ID), `role`, `exp` (expiry time).
+- **Signature:** `HMAC-SHA256(header + "." + payload, SECRET)`. Change one letter of the payload and it no longer matches.
+
+| Pros | Cons |
+| --- | --- |
+| No session storage | Hard to revoke before it expires |
+| Works across many servers | A stolen token works until it expires |
+| Great for microservices | Anyone can read the payload |
+| Portable between services | Tokens can get large |
+
+**Many services:** with HS256, every service needs the same secret to verify, so every service could also **create** tokens. With **RS256**, only the auth service has the private key to sign; the others only have the public key to verify.
 
 ```js
 // LOGIN: create a JWT
@@ -469,21 +580,14 @@ function authenticate(req, res, next) {
 }
 ```
 
-**Why is it called stateless?** A session needs a Redis lookup on every request. A JWT has the claims inside the token, so the server only checks the signature.
-
-| Pros | Cons |
-| --- | --- |
-| No session storage needed | Hard to revoke immediately |
-| Works across distributed servers | A stolen token is valid until it expires |
-| Great for microservices | Payload is visible (not encrypted) |
-| Portable between services | Tokens can grow large |
-
-**Microservices: HS256 vs RS256.** With HS256, the same secret signs *and* verifies, so every service holds the signing secret, and one compromised service can create tokens. Prefer **RS256/ES256**: only the auth service signs, with a private key, and the other services verify with the public key.
+<Callout type="trap">
+The JWT payload is **encoded, not encrypted**. Anyone can decode it. Never put passwords or secrets in it: only the user ID, role and expiration.
+</Callout>
 
 ## Sessions vs JWT
 
 <Summary>
-Session: the server stores state, and revoking is easy. JWT: the token carries state, and scaling is easy.
+With **sessions**, the server stores the state in Redis and the client only carries an ID, so it's easy to revoke but needs a lookup on every request. With **JWT**, the token carries the state, so there's no lookup and it scales easily, but you can't cancel it before it expires.
 </Summary>
 
 export const sessionPanel = {
@@ -596,7 +700,7 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9…`,
 ## Hybrid: short JWT + refresh token
 
 <Summary>
-Short JWT (15 min) for speed + refresh token (30 days, in Redis) for control. This is the production answer.
+In production I use both: a **short access JWT (15 min)** for fast requests with no lookup, and a **long refresh token (30 days) in Redis** for control. When the JWT expires, the refresh token gets a new JWT and is itself replaced (rotation). If an already-used refresh token shows up again, it was stolen, so I revoke the whole token family.
 </Summary>
 
 export const hybridSteps = [
@@ -715,13 +819,10 @@ HTTP/1.1 401 Unauthorized`,
   ]}
 />
 
-- **Login:** the server issues an access JWT (15 min) and a refresh token (30 days, stored in Redis).
-- **Normal request:** the server verifies the JWT locally, with no Redis. Fast.
-- **JWT expired:** the client sends the refresh token → the server checks Redis → issues a new JWT and a **new** refresh token (rotation).
-- **Logout:** revoke the refresh token. The access JWT still works for up to 15 minutes, which is an accepted trade-off.
-
-**Reuse detection.** Every refresh token from one login belongs to a **family**. When a token is used, it's marked *used*, not deleted. If a used token shows up again, someone stole it, so the server revokes the **whole family**.
-
+- **Normal request:** only the JWT, checked in memory.
+- **JWT expired:** send the refresh token → Redis check → new JWT + **new** refresh token.
+- **An old refresh token shows up again:** someone copied it → revoke every token from that login (the family).
+- **Logout:** revoke the refresh token; the JWT dies within 15 minutes.
 
 ```js
 async function refresh(token) {
@@ -745,7 +846,7 @@ async function refresh(token) {
 ## Cookies
 
 <Summary>
-A cookie is not an authentication mechanism. It's a **transport**: browser storage plus automatic sending.
+A cookie is not an auth method. It's a small piece of browser storage that is **sent automatically** with every request to that site. It can carry a session ID or a JWT. I protect it with **HttpOnly** (JavaScript can't read it), **Secure** (HTTPS only) and **SameSite** (not sent on cross-site requests).
 </Summary>
 
 <CookiePlayground />
@@ -760,6 +861,11 @@ A cookie can carry a session ID or a JWT. The mechanism is the session or the JW
 | `SameSite=Strict` | Never sent on cross-site requests. Strictest CSRF protection. |
 | `MaxAge` | How long the cookie lives. |
 
+**Cookie vs Authorization header**
+
+- **Cookie (browser apps):** sent automatically. HttpOnly protects against XSS, and SameSite against CSRF.
+- **Authorization header (mobile, machine to machine):** `Authorization: Bearer eyJ…`, set manually. There's no CSRF risk because it's never sent automatically.
+
 ```js
 res.cookie('sessionId', sessionId, {
   httpOnly: true, // JS can't read it
@@ -769,11 +875,6 @@ res.cookie('sessionId', sessionId, {
 })
 ```
 
-**Cookie vs Authorization header**
-
-- **Cookie (browser apps):** sent automatically. HttpOnly protects against XSS, and SameSite against CSRF.
-- **Authorization header (mobile, machine to machine):** `Authorization: Bearer eyJ…`, set manually. There's no CSRF risk because it's never sent automatically.
-
 <Callout type="trap">
 "What's the difference between a session and a cookie?" A session is the **authentication mechanism** (state on the server). A cookie is the **transport** (the browser stores and sends it). They're different layers.
 </Callout>
@@ -781,7 +882,7 @@ res.cookie('sessionId', sessionId, {
 ## CSRF tokens
 
 <Summary>
-The browser attaches cookies to **every** request to your site, even one started by evil.com. A CSRF token is a secret value the attacker's page can't read, so forged requests fail.
+CSRF is when another website makes your browser send a request to my site, and the browser **automatically attaches your cookie**. The fix is a random CSRF token that my own frontend sends in a header. The other site can't read that token, so its fake request gets **403**.
 </Summary>
 
 export const csrfNoToken = {
@@ -856,9 +957,9 @@ expected: "9fK2c1…"  ✗`,
   ]}
 />
 
-The server creates a random token per session and gives it to its own frontend. The frontend sends it back in a header on every state-changing request. evil.com can make the browser *send* requests, but the browser won't let it *read* notes.app's pages, so it can never learn the token.
+evil.com can make your browser **send** a request, but it can't **read** notes.app's pages, so it never learns the token.
 
-`SameSite=Lax` already blocks this cross-site POST in modern browsers. CSRF tokens are the second layer. Also, never change state with GET.
+`SameSite=Lax` already blocks most of these; the token is a second lock. Never change data with a GET request.
 
 ```js
 // at login: a random token tied to the session
@@ -884,7 +985,7 @@ CSRF only exists with **cookie** auth, because cookies are sent automatically. A
 ## OAuth 1.0 and OAuth 2.0
 
 <Summary>
-OAuth = tokens with specific permissions instead of passwords. OAuth 2.0 is **authorization only**.
+OAuth lets an app use part of my data, like my Google contacts, **without my password**. Google asks me to approve, then gives the app a token with only that permission, and I can revoke it any time. OAuth 2.0 is only about **what the app can access**, not who I am; that part is OIDC.
 </Summary>
 
 **OAuth 1.0** solved delegation: the travel app redirects you to Google, you approve "read contacts," and the app gets a token for contacts only. You never gave your password, and you can revoke the token anytime. But it needed complex cryptographic signatures on every request.
@@ -914,7 +1015,7 @@ OAuth 2.0 answers "what can this app access?", **not** "who is the user?" That g
 ## PKCE
 
 <Summary>
-PKCE (Proof Key for Code Exchange) makes a stolen authorization code useless: at the token exchange, the app must prove it's the same app that started the login.
+PKCE protects the login code. Before redirecting, the app makes a random secret (the **code_verifier**) and sends only its hash to Google. When it exchanges the code for tokens, it must send the original secret. So a stolen code alone is useless.
 </Summary>
 
 export const pkceSteps = (withPkce) => [
@@ -991,7 +1092,7 @@ code_verifier missing  → reject`,
   ]}
 />
 
-Mobile apps and SPAs can't keep a client secret (anyone can unpack the app), so PKCE replaces the secret with a one-time proof. It's now recommended for **every** Authorization Code flow.
+Mobile and browser apps can't hide a client secret (anyone can open the app's code), so PKCE gives them a fresh secret for every single login.
 
 ```js
 const verifier = crypto.randomBytes(32).toString('base64url')                  // keep secret
@@ -1004,7 +1105,7 @@ const challenge = crypto.createHash('sha256').update(verifier).digest('base64url
 ## OpenID Connect (OIDC)
 
 <Summary>
-OIDC = OAuth 2.0 + identity. It adds an **ID token** (a JWT that says who you are). It powers "Sign in with Google."
+OIDC is OAuth 2.0 **plus identity**. Besides the access token, Google gives an **ID token**, a JWT that says who the user is; that's what "Sign in with Google" uses. Google first redirects back with **only a code**, and my server exchanges that code for the ID token and access token.
 </Summary>
 
 export const oidcSteps = [
@@ -1086,7 +1187,8 @@ Authorization: Bearer ya29.a0Af…`,
   steps={oidcSteps}
 />
 
-OAuth 2.0 gives an **access token** (what the app can do). OIDC adds an **ID token** (who the user is):
+- **Access token** → what the app can do (call Google APIs).
+- **ID token** → who the user is (name, email). It's a JWT that your app checks:
 
 ```json
 {
@@ -1100,15 +1202,10 @@ OAuth 2.0 gives an **access token** (what the app can do). OIDC adds an **ID tok
 }
 ```
 
-Google redirects back with **only an authorization code**. The ID token and access token come back when the app's server exchanges that code with Google's token endpoint.
-
-
-OAuth 2.0 alone: "this app can read your Google Drive." OIDC on top: "...and the user is Ali, ali@gmail.com."
-
 ## SSO and SAML
 
 <Summary>
-SSO (single sign-on) = log in once at a central **identity provider (IdP)**, and every connected app lets you in. SAML is the older XML protocol for it; OIDC is the modern JSON/JWT one.
+SSO means logging in **once** at a central login server, the identity provider (like Okta), and then every company app lets you in without asking again. SAML is the older XML way to do it; OIDC is the newer JSON/JWT way.
 </Summary>
 
 export const ssoSteps = [
@@ -1197,10 +1294,39 @@ SSO is not a protocol; it's the experience of logging in once. **SAML** and **OI
 ## API key authentication
 
 <Summary>
-A static secret key sent with every request. No login, no sessions, no JWTs. Used for machine-to-machine access.
+An API key is a long secret string that a program sends with every request, in a header. There's no login and no session; the server looks the key up to know which client it is. It's for machine-to-machine calls. I store only a **hash** of the key, like a password.
 </Summary>
 
-The client sends `X-API-Key: sk_live_abc123xyz` (or `Authorization: Bearer …`), and the server looks the key up: `sk_live_abc123xyz → user 42, permissions: read`.
+<StepDiagram
+  title="One request with an API key"
+  actors={[
+    { id: "client", label: "Client", sub: "script / server" },
+    { id: "api", label: "API" },
+    { id: "db", label: "Database" },
+  ]}
+  steps={[
+    { from: "client", to: "api", label: "GET /data + key", caption: "A program (no human, no login) calls the API and sends its key in a header." },
+    { from: "api", to: "api", label: "sha256(key)", caption: "The server hashes the key. Only hashes are stored, so a database leak doesn't leak working keys." },
+    { from: "api", to: "db", label: "find key_hash", caption: "It looks the hash up." },
+    { from: "db", to: "api", label: "user 42, read", dashed: true, caption: "Found: this key belongs to user 42 and can only read." },
+    { from: "api", to: "client", label: "200 data", dashed: true, caption: "The request goes through. No key or unknown key → 401." },
+  ]}
+  debug={[
+    `GET /data HTTP/1.1\nHost: api.notes.app\nX-API-Key: sk_live_abc123xyz`,
+    `sha256("sk_live_abc123xyz")  → "9b74c9897bac770f…"`,
+    `SELECT user_id, permissions FROM api_keys\nWHERE key_hash = '9b74c9897bac770f…' AND active = true;`,
+    `(1 row)   user_id = 42 | permissions = read`,
+    `HTTP/1.1 200 OK\n\n{ "data": [ … ] }`,
+  ]}
+/>
+
+| Use case | Best auth | Why |
+| --- | --- | --- |
+| Web app login | Session or JWT | A user logs in |
+| Mobile app | JWT | Stateless, portable |
+| Machine to machine | API key | No user involved |
+| Third-party access | OAuth 2.0 | Limited, revocable permissions |
+| Sign in with Google | OIDC | Identity from Google |
 
 ```js
 async function apiKeyAuth(req, res, next) {
@@ -1217,18 +1343,10 @@ async function apiKeyAuth(req, res, next) {
 }
 ```
 
-| Use case | Best auth | Why |
-| --- | --- | --- |
-| Web app login | Session or JWT | User identity needed |
-| Mobile app | JWT | Stateless, portable |
-| Machine to machine | API key | No user involved |
-| Third-party access | OAuth 2.0 | Delegated permissions |
-| Sign in with Google | OIDC | Identity from the provider |
-
 ## Service-to-service auth (mTLS)
 
 <Summary>
-In normal TLS, only the server proves who it is. In **mutual TLS**, both sides present certificates, so services authenticate each other without API keys.
+In normal HTTPS, only the server shows a certificate. In **mutual TLS**, both sides show one, so two services can prove who they are to each other without API keys. In Kubernetes, a service mesh like Istio sets this up automatically.
 </Summary>
 
 export const tlsActors = [
@@ -1335,19 +1453,17 @@ app.post('/charge', (req, res) => {
 })
 ```
 
-In Kubernetes, a service mesh (Istio, Linkerd) does this automatically: it issues and rotates a certificate for every service, and adds mTLS to every call.
-
 ## RBAC: role-based access control
 
 <Summary>
-Users get roles, and roles get permissions. The server checks the role on every request and returns 403 if it's not allowed.
+RBAC means each user has a **role** (user, moderator, admin) and each role has permissions. A middleware checks the role on every request and returns **403** if it's not allowed. Before that, authentication must return **401** for a bad token, not crash with 500.
 </Summary>
 
 <RbacSimulator />
 
 - **user** → read own notes
 - **moderator** → read and write any note
-- **admin** → read, write, delete, and access the dead zone
+- **admin** → everything, plus the dead zone
 
 ```js
 // authentication: who are you? (jwt.verify throws on a bad token, so catch it -> 401)
@@ -1377,7 +1493,7 @@ app.get('/notes', authenticate, authorize('user', 'moderator', 'admin'), getNote
 ## Ownership checks (BOLA / IDOR)
 
 <Summary>
-A role check says what **kind** of action you can do. An ownership check says whether **this specific record** is yours. Missing it is Broken Object Level Authorization (BOLA, also called IDOR), the #1 API risk.
+A role check isn't enough. If Ali changes `/notes/7` to `/notes/8`, his role check still passes, so I must also check that the note **belongs to him**: `WHERE id = $1 AND owner_id = $2`. Missing this is called BOLA or IDOR, the #1 API security bug.
 </Summary>
 
 export const bolaRoleOnly = {
@@ -1465,7 +1581,7 @@ Never trust an ID just because it came from a logged-in user. Take the user's id
 ## Generic errors and timing attacks
 
 <Summary>
-Every login failure must look the same: same message, and roughly the same time.
+On login failure I always return the same message, "authentication failed", never "user not found" or "wrong password". I also make every failure take the **same time** by always running `argon2.verify`, with a real dummy hash when the user doesn't exist. Otherwise attackers can find out which emails are registered.
 </Summary>
 
 export const noUser = {
@@ -1601,10 +1717,13 @@ export const timingDebugFixed = [
   ]}
 />
 
-**Generic errors.** Messages like "user not found," "incorrect password" or "account locked" tell attackers which emails exist. Always return `401 { error: 'authentication failed' }`.
+**Specific messages tell attackers what to try next:**
 
-**Timing attacks.** If the email doesn't exist, login fails fast (~5 ms). If the email exists but the password is wrong, hashing makes it slow (~200 ms). The attacker measures the difference.
+- `user not found` → this email doesn't exist
+- `incorrect password` → the email exists, now guess the password
+- `account locked` → the email exists
 
+Always return `401 { "error": "authentication failed" }`.
 
 ```js
 // FIX 1: always hash. The dummy must be a REAL argon2 hash, computed once at startup.
@@ -1624,7 +1743,7 @@ const match = crypto.timingSafeEqual(a, b)
 ## Password reset
 
 <Summary>
-Same response whether the email exists or not. A random, single-use, short-lived token, stored **hashed**. After the reset, kill all old sessions.
+The user enters an email and I **always reply with the same message**, whether the account exists or not. If it exists, I email a random one-time link that expires in 15 minutes, and I store only a hash of that token. After the password changes, I delete the token and **log the user out everywhere**.
 </Summary>
 
 export const resetSteps = [

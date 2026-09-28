@@ -22,12 +22,12 @@ export function Callout({ type, title, children }: { type: CalloutType; title?: 
   );
 }
 
-// The one line to remember, at the top of every section.
+// What you'd say in an interview if asked about this concept.
 export function Summary({ children }: { children: ReactNode }) {
   return (
     <div className="summary">
-      <span className="summary-label">Remember</span>
-      <div>{children}</div>
+      <span className="summary-label">Interview answer</span>
+      <div className="summary-body">{children}</div>
     </div>
   );
 }

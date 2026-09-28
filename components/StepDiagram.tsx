@@ -30,8 +30,8 @@ type Config = { actors?: Actor[]; steps?: Step[]; panels?: Panel[]; captions?: s
 type Scenario = Config & { label: string };
 type Props = Config & { title: string; scenarios?: Scenario[]; colWidth?: number };
 
-const ROW_H = 38;
-const TOP = 66;
+const ROW_H = 32;
+const TOP = 56;
 const PLAY_MS = 2200;
 
 export function StepDiagram({ title, scenarios, colWidth, ...single }: Props) {
@@ -97,7 +97,8 @@ export function StepDiagram({ title, scenarios, colWidth, ...single }: Props) {
         </div>
       ) : null}
 
-      <div className={panels.length > 1 ? "diagram-panels" : undefined}>
+      <div className={`diagram-stage ${panels.length > 1 ? "is-stacked" : "is-split"}`}>
+      <div className={panels.length > 1 ? "diagram-panels" : "diagram-visual"}>
         {panels.map((panel, i) => (
           <PanelSvg
             key={`${scenario}-${i}`}
@@ -109,6 +110,7 @@ export function StepDiagram({ title, scenarios, colWidth, ...single }: Props) {
         ))}
       </div>
 
+      <div className="diagram-side">
       <p className="diagram-caption" aria-live="polite">
         {current >= 0 ? (
           <>
@@ -139,7 +141,7 @@ export function StepDiagram({ title, scenarios, colWidth, ...single }: Props) {
 
       {config.debug ? (
         <div className="debug" aria-live="polite">
-          <p className="debug-title">Debug view: what you&apos;d see for this step</p>
+          <p className="debug-title">Debug view</p>
           <div className={panels.length > 1 ? "debug-grid" : undefined}>
             {debugBlocks.map((block, i) => (
               <div key={i} className="debug-block">
@@ -150,6 +152,8 @@ export function StepDiagram({ title, scenarios, colWidth, ...single }: Props) {
           </div>
         </div>
       ) : null}
+      </div>
+      </div>
     </figure>
   );
 }
@@ -173,7 +177,7 @@ function PanelSvg({ panel, current, rows, colWidth }: { panel: Panel; current: n
   return (
     <div className="diagram-panel">
       {panel.title ? <p className="diagram-panel-title">{panel.title}</p> : null}
-      <svg viewBox={`0 0 ${width} ${height}`} style={{ minWidth: actors.length * 125 }} role="img" aria-label={panel.title ?? "sequence diagram"}>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ minWidth: actors.length * 125, maxWidth: width * 1.1 }} role="img" aria-label={panel.title ?? "sequence diagram"}>
         <defs>
           {(["cur", "past", "bad"] as const).map((k) => (
             <marker key={k} id={`${uid}-${k}`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -208,7 +212,7 @@ function PanelSvg({ panel, current, rows, colWidth }: { panel: Panel; current: n
           if (!s || i > current) return null;
           const isCurrent = i === current;
           const kind = s.tone === "bad" ? "bad" : isCurrent ? "cur" : "past";
-          const y = TOP + i * ROW_H + 22;
+          const y = TOP + i * ROW_H + 20;
           const color = `var(--sd-${kind})`;
           const opacity = isCurrent ? 1 : 0.55;
 

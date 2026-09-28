@@ -1,7 +1,7 @@
 ## What is a backend?
 
 <Summary>
-The backend is the permanent, trusted, central computer that remembers things for everyone, keeps secrets safe, and applies the rules the same way for every user.
+The backend is the central server that **stores data for everyone**, keeps secrets like the database password, and applies the same rules to every user. The frontend runs on the user's own device and forgets everything when the tab closes.
 </Summary>
 
 export const twitterNoBackend = {
@@ -59,12 +59,10 @@ export const twitterWithBackend = {
   ]}
 />
 
-A browser shows a nice interface, but it forgets everything when you close the tab. Everything else in this topic is a different angle on that one idea.
-
 ## Glossary
 
 <Summary>
-JavaScript is the language, V8 runs it, and the browser or Node.js is the runtime that gives it APIs. Express is a framework on top of Node.
+JavaScript is just the language. **V8** is the engine that runs it. The **browser** and **Node.js** are runtimes: V8 plus extra tools (DOM and fetch in the browser; files and networking in Node). **Express** is a framework on top of Node for routes and middleware.
 </Summary>
 
 | Term | Meaning |
@@ -83,7 +81,7 @@ JavaScript is the language, V8 runs it, and the browser or Node.js is the runtim
 ## How a request travels
 
 <Summary>
-Browser → DNS (find the IP) → Nginx (TLS + routing) → Node (your code) → database, then all the way back.
+When I type google.com: **DNS** gives the IP → the browser connects on port 443 → **Nginx** decrypts HTTPS and forwards plain HTTP to **Node** on port 3000 → Node runs my code and queries the **database** → the response goes back the same way, Nginx encrypts it, and the browser shows the page.
 </Summary>
 
 export const lifecycleSteps = [
@@ -130,7 +128,7 @@ export const lifecycleDebug = [
 ## DNS records: A and CNAME
 
 <Summary>
-An **A record** maps a domain to an IP. A **CNAME** maps a name to another name. If the IP changes, you update one A record and every CNAME follows.
+DNS turns a name into an IP. An **A record** points a domain straight to an IP. A **CNAME** points a name to another name. I point www, api and blog at the main domain with CNAMEs, so if the server IP changes, I update just one A record.
 </Summary>
 
 export const dnsSteps = [
@@ -170,39 +168,72 @@ export const dnsDebug = [
 ## Reverse proxy (Nginx)
 
 <Summary>
-A reverse proxy sits in front of your app and receives every request. The user never touches your app directly. Nginx handles SSL termination, routing and load balancing.
+Nginx sits **in front of** my Node app. Users only talk to Nginx on port 443. Nginx decrypts HTTPS, forwards the request as plain HTTP to my app on `localhost:3000`, and sends the answer back. The same Nginx can spread requests across several app servers (load balancing).
 </Summary>
 
-export const proxySteps = [
-  { from: "user", to: "nginx", label: "GET /profile", caption: "A request arrives at Nginx, not at your app." },
-  { from: "nginx", to: "app1", label: "→ app 1", caption: "Nginx forwards it to app server 1." },
-  { from: "user", to: "nginx", label: "GET /orders", caption: "The next request arrives." },
-  { from: "nginx", to: "app2", label: "→ app 2", caption: "Load balancing: this one goes to app server 2." },
-  { from: "user", to: "nginx", label: "GET /products", caption: "A third request..." },
-  { from: "nginx", to: "app3", label: "→ app 3", caption: "...goes to app server 3. The user only ever sees one address." },
-]
-
-export const proxyDebug = [
-  `GET /profile HTTP/1.1\nHost: yourapp.com`,
-  `upstream: 10.0.0.11:3000   "GET /profile" 200 12ms`,
-  `GET /orders HTTP/1.1\nHost: yourapp.com`,
-  `upstream: 10.0.0.12:3000   "GET /orders" 200 18ms`,
-  `GET /products HTTP/1.1\nHost: yourapp.com`,
-  `upstream: 10.0.0.13:3000   "GET /products" 200 9ms`,
-]
-
 <StepDiagram
-  title="Nginx load balancing across three app servers"
-  debug={proxyDebug}
-  actors={[
-    { id: "user", label: "User" },
-    { id: "nginx", label: "Nginx" },
-    { id: "app1", label: "App 1" },
-    { id: "app2", label: "App 2" },
-    { id: "app3", label: "App 3" },
+  title="What Nginx actually does"
+  scenarios={[
+    {
+      label: "Forwarding (one app)",
+      actors: [
+        { id: "user", label: "User" },
+        { id: "nginx", label: "Nginx", sub: "port 443 (public)" },
+        { id: "node", label: "Node app", sub: "localhost:3000" },
+      ],
+      steps: [
+        { from: "user", to: "nginx", label: "HTTPS request", caption: "The browser connects to yourapp.com on port 443. That is Nginx, not your app." },
+        { from: "nginx", to: "nginx", label: "decrypt (TLS)", caption: "Nginx has the SSL certificate. It decrypts the request, so now it can read the URL and headers." },
+        { from: "nginx", to: "nginx", label: "check config", caption: "Nginx looks at its config: everything for yourapp.com goes to the Node app." },
+        { from: "nginx", to: "node", label: "plain HTTP :3000", caption: "It sends the same request as plain HTTP to localhost:3000. Port 3000 is closed to the internet, so only Nginx can reach your app." },
+        { from: "node", to: "nginx", label: "200 + JSON", dashed: true, caption: "Your app answers Nginx like any normal client. It never touched HTTPS." },
+        { from: "nginx", to: "nginx", label: "encrypt", caption: "Nginx encrypts the answer." },
+        { from: "nginx", to: "user", label: "HTTPS response", dashed: true, caption: "The user gets the response. They only ever talked to Nginx." },
+      ],
+      debug: [
+        `GET /api/products HTTP/1.1          (encrypted, sent to 65.21.100.200:443)\nHost: yourapp.com`,
+        `nginx: TLS with /etc/letsencrypt/live/yourapp.com/fullchain.pem\ndecrypted → GET /api/products HTTP/1.1`,
+        `server {\n  listen 443 ssl;\n  server_name yourapp.com;\n  location / { proxy_pass http://127.0.0.1:3000; }\n}`,
+        `GET /api/products HTTP/1.1\nHost: yourapp.com\nX-Forwarded-For: 203.0.113.7      ← the real user's IP\nX-Forwarded-Proto: https          ← the user used HTTPS`,
+        `HTTP/1.1 200 OK\nContent-Type: application/json\n\n[{ "id": 1, "name": "Laptop" }]`,
+        `nginx encrypts the response with the TLS session key`,
+        `HTTP/1.1 200 OK   (encrypted)\naccess.log: 203.0.113.7 "GET /api/products" 200 12ms`,
+      ],
+    },
+    {
+      label: "Load balancing (three apps)",
+      actors: [
+        { id: "user", label: "Users" },
+        { id: "nginx", label: "Nginx" },
+        { id: "app1", label: "App 1" },
+        { id: "app2", label: "App 2" },
+        { id: "app3", label: "App 3" },
+      ],
+      steps: [
+        { from: "user", to: "nginx", label: "GET /profile", caption: "Request 1 arrives at Nginx." },
+        { from: "nginx", to: "app1", label: "→ app 1", caption: "Nginx sends it to app server 1." },
+        { from: "user", to: "nginx", label: "GET /orders", caption: "Request 2 arrives." },
+        { from: "nginx", to: "app2", label: "→ app 2", caption: "It goes to app server 2 (Nginx takes turns: round robin)." },
+        { from: "user", to: "nginx", label: "GET /products", caption: "Request 3 arrives." },
+        { from: "nginx", to: "app3", label: "→ app 3", caption: "It goes to app server 3. If one app crashes, Nginx just skips it. Users still see only one address." },
+      ],
+      debug: [
+        `GET /profile HTTP/1.1\nHost: yourapp.com`,
+        `upstream → 10.0.0.11:3000   "GET /profile" 200 12ms`,
+        `GET /orders HTTP/1.1\nHost: yourapp.com`,
+        `upstream → 10.0.0.12:3000   "GET /orders" 200 18ms`,
+        `GET /products HTTP/1.1\nHost: yourapp.com`,
+        `upstream → 10.0.0.13:3000   "GET /products" 200 9ms`,
+      ],
+    },
   ]}
-  steps={proxySteps}
 />
+
+**Why not let users hit Node directly?**
+
+- Nginx handles the SSL certificate, so Node never deals with HTTPS.
+- Only ports 80 and 443 are open to the internet. Port 3000 stays private.
+- One Nginx can send traffic to many app servers, and skip one that's down.
 
 ```nginx
 upstream app {
@@ -226,7 +257,7 @@ server {
 ## SSH vs SSL
 
 <Summary>
-SSL/TLS encrypts traffic between the browser and the server (HTTP → HTTPS). SSH is a completely different tool: remote access to your server's terminal.
+**SSL** (today really TLS) encrypts the traffic between the browser and my server, which turns HTTP into HTTPS; Nginx handles it. **SSH** is a completely different tool: it lets me log into my server's terminal from my laptop.
 </Summary>
 
 | | SSL / TLS | SSH |
@@ -240,7 +271,7 @@ SSL/TLS is the envelope; HTTPS is HTTP delivered inside that sealed envelope.
 ## Why can't the frontend talk to the database?
 
 <Summary>
-Three reasons: **security** (anyone can read frontend code), **secrets** (the DB password would be public), and **business logic** (it must run once, correctly, for everyone).
+Because frontend code is public. To connect, the database password would have to be in the JavaScript, and anyone could read it in DevTools and run any query. The backend keeps the password secret, checks who you are, returns only your data, and runs rules like "check the balance first" the same way for everyone.
 </Summary>
 
 export const directDb = {
@@ -305,7 +336,7 @@ export const viaBackend = {
 ## CORS and the preflight request
 
 <Summary>
-CORS decides whether JavaScript on one origin may read a response from another origin. The **browser** enforces it; the **backend** sets the rules with headers.
+CORS is a **browser** rule: JavaScript on one site can't read a response from another site unless that server allows it with `Access-Control-Allow-Origin`. The browser enforces it; the backend decides. For requests like DELETE, or ones with an Authorization header, the browser first sends an **OPTIONS preflight** to ask permission.
 </Summary>
 
 export const corsActors = [
@@ -396,7 +427,7 @@ app.use(cors({ origin: 'https://yourapp.com' })) // production: only your fronte
 ## Core principles: client-server and stateless
 
 <Summary>
-The client sends a request and the server sends a response. Every request is **independent** and carries everything needed (Host, Authorization), so any server can handle any request.
+Every HTTP request is **independent** and carries everything the server needs, like the Authorization header. The server doesn't remember earlier requests. That's why any server behind a load balancer can handle any request, and I can scale by just adding servers.
 </Summary>
 
 export const lbSteps = [
@@ -430,12 +461,12 @@ export const lbDebug = [
   steps={lbSteps}
 />
 
-If a server keeps user state in its own memory, the next request may land on a server that doesn't have it. The fix is **shared storage** (Redis or a database) that every server reads. The Auth topic shows this step by step.
+If you do keep something in one server's memory, the next request may land on a different server that doesn't have it. The fix is to keep it in shared Redis or the database.
 
 ## HTTP versions
 
 <Summary>
-1.0: a new TCP connection per request. 1.1: reuse the connection. 2: many requests at once on one connection (multiplexing). 3: QUIC over UDP, so one lost packet doesn't stall the other streams.
+HTTP/1.0 opened a **new TCP connection per request**. 1.1 **reuses** one connection. HTTP/2 sends **many requests at once** over one connection. HTTP/3 uses **QUIC over UDP**, so one lost packet only delays its own request, not all of them.
 </Summary>
 
 export const verActors = [
@@ -499,8 +530,15 @@ export const verActors = [
 ## Anatomy of an HTTP message
 
 <Summary>
-Start line → headers → blank line → optional body. Same shape for requests and responses.
+Every HTTP message has four parts: the **first line** (method + URL, or status code), **headers**, a **blank line**, and an optional **body**.
 </Summary>
+
+| Part | What it's for |
+| --- | --- |
+| Start line | Request: method + URL + version. Response: version + status code + text. |
+| Headers | Extra information about the request or response. |
+| Blank line | Separates headers from the body. |
+| Body (optional) | The data: sent in POST/PUT/PATCH, returned in responses. A GET normally has no body. |
 
 ```http
 GET /api/users HTTP/1.1
@@ -521,17 +559,10 @@ Cache-Control: no-cache
 { "status": "success", "data": [ ... ] }
 ```
 
-| Part | What it's for |
-| --- | --- |
-| Start line | Request: method + URL + version. Response: version + status code + text. |
-| Headers | Extra information about the request or response. |
-| Blank line | Separates headers from the body. |
-| Body (optional) | The data: sent in POST/PUT/PATCH, returned in responses. A GET normally has no body. |
-
 ## Important headers
 
 <Summary>
-Headers carry metadata: format, auth, cookies, caching, compression, and security policies.
+Headers are extra information about the request or response: the body format (`Content-Type`), who I am (`Authorization`), cookies, caching rules, compression, and security rules like HSTS and CSP.
 </Summary>
 
 | Header | Sent in | What it does | Example |
@@ -553,18 +584,10 @@ Headers carry metadata: format, auth, cookies, caching, compression, and securit
 ## Methods and idempotency
 
 <Summary>
-Idempotent = repeating the same request leaves the server in the same final state as doing it once. GET, PUT and DELETE are idempotent; POST is not; PATCH depends.
+Idempotent means sending the same request twice leaves the **same final result** as sending it once. GET, PUT and DELETE are idempotent; POST is not, so retrying it can create a **duplicate order**. It matters because networks fail and clients retry.
 </Summary>
 
 <IdempotencySimulator />
-
-| Method | Intent | Idempotent? |
-| --- | --- | --- |
-| GET | Read, change nothing | Yes |
-| POST | Create / submit | No |
-| PUT | Replace the whole resource | Yes |
-| PATCH | Partial update | Depends: "add $10" is not; "set price to 900" is |
-| DELETE | Delete | Yes: already gone is still gone |
 
 export const retryPut = {
   title: "PUT /users/123",
@@ -621,10 +644,18 @@ export const retryPost = {
   ]}
 />
 
+| Method | Intent | Idempotent? |
+| --- | --- | --- |
+| GET | Read, change nothing | Yes |
+| POST | Create / submit | No |
+| PUT | Replace the whole resource | Yes |
+| PATCH | Partial update | Depends: "add $10" is not; "set price to 900" is |
+| DELETE | Delete | Yes: already gone is still gone |
+
 ## Status codes
 
 <Summary>
-1xx keep going, 2xx success, 3xx redirect/cache, 4xx client problem, 5xx server problem.
+**2xx** success, **3xx** go elsewhere or use your cache, **4xx** the client made a mistake, **5xx** the server failed. The common ones: 200, 201, 204, 301, 304, 400, 401, 403, 404, 409, 429, 500, 502, 503, 504.
 </Summary>
 
 | Range | Meaning | Codes |
@@ -642,7 +673,7 @@ export const retryPost = {
 ## HTTP caching
 
 <Summary>
-First response: payload + `Cache-Control`, `ETag`, `Last-Modified`. Next time the client sends `If-None-Match`; if nothing changed, the server replies with an empty **304 Not Modified**.
+The first response includes an **ETag**, a fingerprint of the content. Next time the browser sends it back in `If-None-Match`. If nothing changed, the server replies **304 Not Modified** with an empty body and the browser uses its saved copy, which saves bandwidth.
 </Summary>
 
 export const cacheActors = [
@@ -697,7 +728,7 @@ Express does this for you: `res.send()` / `res.json()` add an ETag and answer `3
 ## Content negotiation
 
 <Summary>
-The same URL can return different formats, languages or compression depending on the client's `Accept`, `Accept-Language` and `Accept-Encoding` headers.
+The client says what it wants with headers: `Accept` (JSON or XML), `Accept-Language`, `Accept-Encoding` (gzip). The server sends the best match from the **same URL**, or **406** if it can't.
 </Summary>
 
 export const negActors = [
@@ -746,6 +777,8 @@ export const negActors = [
   ]}
 />
 
+**Compression:** with `Accept-Encoding: gzip`, a 26 MB JSON payload can shrink to about 3.8 MB. Almost every production API enables gzip/br.
+
 ```js
 app.get('/report', (req, res) => {
   res.format({
@@ -756,12 +789,10 @@ app.get('/report', (req, res) => {
 })
 ```
 
-**Compression:** with `Accept-Encoding: gzip`, a 26 MB JSON payload can shrink to about 3.8 MB. Almost every production API enables gzip/br.
-
 ## Large data transfers
 
 <Summary>
-Big uploads: `multipart/form-data`. Big downloads: **stream** the file in chunks, with `Content-Disposition`, and support `Range` requests so interrupted downloads can resume.
+For big uploads I use **multipart/form-data**, which sends the file as raw bytes in parts. For big downloads I **stream** the file in chunks instead of loading it into memory, set `Content-Disposition`, and support **Range** requests so a broken download resumes with **206 Partial Content**.
 </Summary>
 
 export const bigActors = [
@@ -823,6 +854,8 @@ export const bigActors = [
   ]}
 />
 
+`Content-Type: text/event-stream` is for **Server-Sent Events** (live updates like notifications or progress), not for file downloads.
+
 ```js
 // download: stream instead of loading the whole file into memory
 app.get('/files/:name', (req, res) => {
@@ -833,12 +866,10 @@ app.get('/files/:name', (req, res) => {
 // res.sendFile(file) also handles Range requests (206) for you
 ```
 
-`Content-Type: text/event-stream` is for **Server-Sent Events** (live updates like notifications or progress), not for file downloads.
-
 ## TLS and HTTPS
 
 <Summary>
-TLS encrypts data in transit (stops eavesdropping and tampering) and proves the server's identity with a certificate signed by a trusted CA. HTTPS = HTTP inside TLS.
+TLS **encrypts** the traffic so nobody can read or change it on the way, and the **certificate** proves the server is really who it says it is. The browser checks the certificate against its list of trusted Certificate Authorities. HTTPS is just HTTP inside TLS.
 </Summary>
 
 export const tlsSteps = [

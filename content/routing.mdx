@@ -1,7 +1,7 @@
 ## How Express reads a URL
 
 <Summary>
-**URL** = which resource? **Method** = what to do with it? **Path parameter** = which specific one? **Query parameter** = how do I want the result?
+The **URL** says which resource, the **method** says what to do with it. Express uses the path to find the matching route, puts `:params` into `req.params`, and puts everything after `?` into `req.query`. All values are strings.
 </Summary>
 
 export const readUrlSteps = [
@@ -36,8 +36,10 @@ export const readUrlDebug = [
 ## Static routes
 
 <Summary>
-A fixed URL. The path itself never changes.
+A static route is a **fixed path**, like `/api/products`. It always means the same thing: "give me all products".
 </Summary>
+
+Other examples: `/api/users`, `/api/orders`, `/api/categories`.
 
 ```js
 app.get('/api/products', (req, res) => {
@@ -45,12 +47,10 @@ app.get('/api/products', (req, res) => {
 })
 ```
 
-Other examples: `/api/users`, `/api/orders`, `/api/categories`.
-
 ## Dynamic routes (path parameters)
 
 <Summary>
-`:productId` matches one segment and identifies **one specific** resource. Express puts it in `req.params`.
+A dynamic route has a placeholder, like `/api/products/:productId`. It matches `/api/products/123`, and Express puts `"123"` in `req.params.productId`. It's for **one specific item**.
 </Summary>
 
 ```js
@@ -63,15 +63,8 @@ app.get('/api/products/:productId', (req, res) => {
 ## Query parameters
 
 <Summary>
-For filtering, searching, sorting and pagination. Express puts them in `req.query`, and they are not part of route matching.
+Query parameters come after the `?`, like `?category=shoes&page=2`. They're for **filtering, sorting and pagination**. Express puts them in `req.query`, and they are **not** used to pick the route.
 </Summary>
-
-```js
-// GET /api/products?category=shoes&page=2&limit=20&sort=price
-app.get('/api/products', (req, res) => {
-  const { category, page, limit, sort } = req.query // all strings: page === "2"
-})
-```
 
 | | Path parameter | Query parameter |
 | --- | --- | --- |
@@ -80,6 +73,13 @@ app.get('/api/products', (req, res) => {
 | Express | `req.params` | `req.query` |
 | Used for matching? | Yes | No |
 
+```js
+// GET /api/products?category=shoes&page=2&limit=20&sort=price
+app.get('/api/products', (req, res) => {
+  const { category, page, limit, sort } = req.query // all strings: page === "2"
+})
+```
+
 <Callout type="trap">
 `req.params` and `req.query` values are always **strings**. `req.query.page` is `"2"`, not `2`, so convert it with `Number()` before doing math.
 </Callout>
@@ -87,8 +87,10 @@ app.get('/api/products', (req, res) => {
 ## Nested routes
 
 <Summary>
-Parent → child relationship: the orders **of** a user. Keep nesting shallow.
+Nested routes show a **parent-child** relationship, like `/users/123/orders` for the orders of user 123. I keep them at most two levels deep.
 </Summary>
+
+If URLs start looking like `/users/123/orders/456/items/789/reviews/999`, rethink the resource design. `/orders/456` or `/reviews/999` usually works on its own.
 
 ```js
 app.get('/api/users/:userId/orders', (req, res) => {
@@ -100,12 +102,10 @@ app.get('/api/users/:userId/orders/:orderId', (req, res) => {
 })
 ```
 
-If URLs start looking like `/users/123/orders/456/items/789/reviews/999`, rethink the resource design. `/orders/456` or `/reviews/999` usually works on its own.
-
 ## API versioning
 
 <Summary>
-Put breaking changes in a new version (`/v2`), so old clients keep working on `/v1` until they migrate.
+When I make a **breaking change**, like renaming a field, I put it in `/api/v2` and keep `/api/v1` working, so old apps don't break. Once everyone has moved, I remove v1.
 </Summary>
 
 export const verClient = [
@@ -162,10 +162,8 @@ app.get('/api/v2/products', getProductsV2)
 ## Catch-all 404 and route order
 
 <Summary>
-Express matches routes **top to bottom** and stops at the first match. The 404 handler goes **last**.
+Express checks routes **from top to bottom** and uses the **first** match. So the 404 catch-all `app.use()` must be the very last one; if it's first, it catches every request.
 </Summary>
-
-Try the e-commerce routes below. Tick the "mistake" box to see what happens when the catch-all is at the top.
 
 <RouteMatcher />
 
@@ -187,8 +185,10 @@ A request with a wrong method (e.g. `DELETE /api/v1/products` when only GET/POST
 ## Real-world example: e-commerce
 
 <Summary>
-Static + query, dynamic, nested, create, update, delete, and catch-all, all in one small app.
+One small app that uses everything: a static route with query params, a dynamic route, a nested route, create, update, delete, and the 404 catch-all at the end.
 </Summary>
+
+Define each route once. Don't register `GET /api/v1/products` twice; combine the logic in one handler.
 
 ```js
 const express = require('express')
@@ -227,12 +227,10 @@ app.use((req, res) => { // catch-all, last
 app.listen(3000)
 ```
 
-Define each route once. Don't register `GET /api/v1/products` twice; combine the logic in one handler.
-
 ## Best practices
 
 <Summary>
-Nouns not verbs, plural names, meaningful parameter names, query params for filters, PATCH vs PUT, shallow nesting, 404 last.
+Nouns, not verbs (`GET /users`, not `/getUsers`). Plural names. Clear parameter names like `:productId`. Query params for filters. PATCH for partial updates. Shallow nesting. The 404 handler last.
 </Summary>
 
 | Rule | Good | Bad |
